@@ -55,7 +55,7 @@ test('a saved Stremio session is reported by email only and can be forgotten', a
         const token = created.headers.get('location').split('/')[1];
 
         const none = await json(`${base}/api/${token}/stremio/device`);
-        assert.deepEqual(none, { email: null, saved: false });
+        assert.deepEqual(none, { email: null, saved: false, addon: null });
         const missing = await fetch(`${base}/api/${token}/stremio`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -66,8 +66,11 @@ test('a saved Stremio session is reported by email only and can be forgotten', a
         const value = Buffer.from(JSON.stringify({ authKey: 'secret-key', email: 'me@example.com' })).toString('base64url');
         const saved = await fetch(`${base}/api/${token}/stremio/device`, { headers: { cookie: `streamlol_stremio=${value}` } });
         const body = await saved.text();
-        assert.deepEqual(JSON.parse(body), { email: 'me@example.com', saved: true });
         assert.equal(body.includes('secret-key'), false);
+        const parsed = JSON.parse(body);
+        // Fake auth keys are rejected by Stremio; the device cookie is cleared.
+        assert.equal(parsed.saved, false);
+        assert.equal(parsed.addon, null);
 
         const forgot = await fetch(`${base}/api/${token}/stremio/device`, { method: 'DELETE' });
         assert.match(forgot.headers.get('set-cookie'), /streamlol_stremio=; Max-Age=0; Path=\/; HttpOnly/);

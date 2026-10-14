@@ -230,22 +230,35 @@ function isThisLibraryAddon(addon, manifestUrl) {
     return url === wanted || url.startsWith(`${wanted}?`);
 }
 
-// Install this library's Shelves addon when missing; refresh it when already present
-// so Board rows update without asking the user to reinstall.
-async function syncAddon(authKey, manifestUrl) {
-    if (!authKey || !manifestUrl) return { installed: false, updated: false };
+// Read-only: is this library's Shelves URL already on the account?
+async function probeAddon(authKey, manifestUrl) {
+    if (!authKey || !manifestUrl) return { installed: false };
     const httpsUrl = normalizeManifestUrl(manifestUrl);
-    let addons = await addonCollection(authKey);
-    const wasInstalled = addons.some((addon) => isThisLibraryAddon(addon, httpsUrl));
-    addons = await addonCollection(authKey, { addFromURL: [httpsUrl] });
-    const match = addons.find((addon) => isThisLibraryAddon(addon, httpsUrl))
-        || findShelvesAddon(addons, httpsUrl);
-    const installed = Boolean(match && isThisLibraryAddon(match, httpsUrl));
+    const addons = await addonCollection(authKey);
+    const match = addons.find((addon) => isThisLibraryAddon(addon, httpsUrl));
     return {
-        installed,
-        updated: installed,
-        wasInstalled,
-        transportUrl: installed ? (transportOf(match) || httpsUrl) : null,
+        installed: Boolean(match),
+        wasInstalled: Boolean(match),
+        transportUrl: match ? transportOf(match) : null,
+    };
+}
+
+// Install only when missing. If already installed, do not addFromURL again
+// (that can create a duplicate addon) — the live manifest URL already updates Board rows.
+async function syncAddon(authKey, manifestUrl) {
+    if (!authKey || !manifestUrl) return { installed: false, updated: false, wasInstalled: false };
+    const httpsUrl = normalizeManifestUrl(manifestUrl);
+    const probed = await probeAddon(authKey, httpsUrl);
+    if (probed.installed) {
+        return { installed: true, updated: true, wasInstalled: true, transportUrl: probed.transportUrl || httpsUrl };
+    }
+    const addons = await addonCollection(authKey, { addFromURL: [httpsUrl] });
+    const match = addons.find((addon) => isThisLibraryAddon(addon, httpsUrl));
+    return {
+        installed: Boolean(match),
+        updated: Boolean(match),
+        wasInstalled: false,
+        transportUrl: match ? (transportOf(match) || httpsUrl) : null,
     };
 }
 
@@ -254,12 +267,12 @@ async function refreshAddonStatus(token, manifestUrl) {
     const link = library.stremio;
     if (!link || !link.authKey || !manifestUrl) return null;
     try {
-        const httpsUrl = normalizeManifestUrl(manifestUrl);
-        const addons = await addonCollection(link.authKey);
-        const match = addons.find((addon) => isThisLibraryAddon(addon, httpsUrl));
-        const addon = { installed: Boolean(match), transportUrl: match ? transportOf(match) : null };
+        const addon = await probeAddon(link.authKey, manifestUrl);
         await update(token, (draft) => {
-            if (draft.stremio) draft.stremio.addon = addon;
+            if (draft.stremio) draft.stremio.addon = {
+                installed: Boolean(addon.installed),
+                transportUrl: addon.transportUrl || null,
+            };
         });
         return addon;
     } catch {
@@ -278,6 +291,7 @@ module.exports = {
     publicStatus,
     addonCollection,
     findShelvesAddon,
+    probeAddon,
     syncAddon,
     refreshAddonStatus,
 };

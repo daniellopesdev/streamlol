@@ -254,10 +254,29 @@ function createApp() {
         res.json(await searchScopes(credential, req.query.q, req.query.type));
     }));
 
-    app.get('/api/:token/stremio/device', (req, res) => {
+    app.get('/api/:token/stremio/device', asyncRoute(async (req, res) => {
         const saved = deviceStremio(req);
-        res.json({ email: saved ? saved.email : null, saved: Boolean(saved) });
-    });
+        if (!saved) {
+            res.json({ email: null, saved: false, addon: null });
+            return;
+        }
+        const manifestUrl = publicUrl(req, req.params.token, 'manifest.json');
+        let addon = null;
+        try {
+            addon = await stremio.probeAddon(saved.authKey, manifestUrl);
+        } catch (error) {
+            if (error.code === 'stremio_expired') {
+                forgetStremio(req, res);
+                res.json({ email: null, saved: false, addon: null, expired: true });
+                return;
+            }
+        }
+        res.json({
+            email: saved.email || null,
+            saved: true,
+            addon: addon ? { installed: Boolean(addon.installed), transportUrl: addon.transportUrl || null } : null,
+        });
+    }));
 
     app.delete('/api/:token/stremio/device', (req, res) => {
         forgetStremio(req, res);
