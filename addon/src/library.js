@@ -29,6 +29,7 @@ function cleanFilm(input, previous = {}) {
         description: typeof input.description === 'string' ? input.description.slice(0, 1000) : (previous.description || ''),
         addedAt: previous.addedAt || Date.now(),
         viewedAt: previous.viewedAt || null,
+        ...(previous.origin ? { origin: previous.origin } : {}),
     };
 }
 

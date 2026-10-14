@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streamlol — your Stremio, curated</title>
+  <meta name="description" content="Library, viewed history, reviews, lists and an advanced Discover for Stremio. Search by director, actor, Criterion Collection, IMDb rating and streaming platform.">
+  <script>
+    try {
+      var saved = localStorage.getItem('streamlol_token');
+      if (saved && /^[a-f0-9]{24}$/.test(saved)) location.replace('/' + saved + '/');
+    } catch (e) {}
+  </script>
+  <link rel="stylesheet" href="/shelves/styles.css">
+</head>
+<body class="welcome">
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"></span>streamlol<span class="brand-tag">shelves</span></div>
+    <div class="topbar-actions">
+      <a class="btn ghost" href="https://github.com/daniellopesdev/streamlol" target="_blank" rel="noopener">GitHub</a>
+      <a class="btn primary" href="/configure?new=1">Create library</a>
+    </div>
+  </header>
+
+  <main class="landing">
+    <section class="hero-landing">
+      <div class="hero-copy">
+        <span class="eyebrow">Stremio addon · free & open source</span>
+        <h1>Your Stremio,<br><span class="glow">curated.</span></h1>
+        <p class="lede">
+          Library, viewed calendar, reviews and lists — plus a Discover that actually digs:
+          every film by a director, every role of an actor, the full Criterion Collection,
+          IMDb rating, genre, decade and streaming platform.
+        </p>
+        <div class="cta-row">
+          <a class="btn primary lg" href="/configure?new=1">Create my library →</a>
+          <button type="button" class="btn ghost lg" id="open-existing">I already have one</button>
+        </div>
+        <form class="existing" id="existing-form" hidden>
+          <input class="input grow" id="existing-input" autocomplete="off" spellcheck="false"
+            placeholder="Paste your library link, manifest URL or token">
+          <button type="submit" class="btn">Open</button>
+          <p class="error" id="existing-error"></p>
+        </form>
+        <p class="muted small">No account. Your library lives behind a private link — bookmark it.</p>
+      </div>
+
+      <div class="preview" aria-hidden="true">
+        <div class="pv-bar"><span>⌕</span><i>nolan</i><kbd>/</kbd></div>
+        <div class="pv-scope">
+          <span class="eyebrow">Director</span>
+          <b>Directed by Christopher Nolan</b>
+          <small>19 credits</small>
+        </div>
+        <div class="pv-seg"><span class="on">Popular</span><span>Top rated</span><span>Newest</span></div>
+        <div class="pv-grid">
+          <div style="--h:205"><em>★ 9.1</em></div>
+          <div style="--h:28"><em>★ 8.7</em></div>
+          <div style="--h:12"><em>★ 8.8</em></div>
+          <div style="--h:262"><em>★ 8.5</em></div>
+          <div style="--h:170"><em>★ 8.4</em></div>
+          <div style="--h:340"><em>★ 8.2</em></div>
+          <div style="--h:45"><em>★ 7.8</em></div>
+          <div style="--h:190"><em>★ 7.4</em></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="features">
+      <article>
+        <span class="f-icon">◎</span>
+        <h3>People search</h3>
+        <p>Type a name, pick <b>Directed by</b> or <b>Starring</b>. Tap anyone in a film's cast to open their filmography.</p>
+      </article>
+      <article>
+        <span class="f-icon">◆</span>
+        <h3>Collections</h3>
+        <p>The Criterion Collection in spine order, franchises, studios, themes — or paste any TMDB list.</p>
+      </article>
+      <article>
+        <span class="f-icon">⚑</span>
+        <h3>Real filters</h3>
+        <p>Include or exclude genres, decades, IMDb score, vote count and your country's streaming services.</p>
+      </article>
+      <article>
+        <span class="f-icon">▦</span>
+        <h3>Your shelves</h3>
+        <p>Library, a viewed-by-month calendar, 1–10 reviews and custom lists you can reorder.</p>
+      </article>
+      <article>
+        <span class="f-icon">▶</span>
+        <h3>On your TV</h3>
+        <p>Save any search as a <b>Shelves · …</b> row. It shows on Stremio's Board on every device, TV included.</p>
+      </article>
+      <article>
+        <span class="f-icon">◇</span>
+        <h3>Nothing touched</h3>
+        <p>Catalog-only addon. Your player, streaming addons and debrid setup stay exactly as they are.</p>
+      </article>
+    </section>
+
+    <section class="steps-landing">
+      <h2>Up in two minutes</h2>
+      <ol>
+        <li><b>Create a library</b><span>You get a private link — this device remembers it.</span></li>
+        <li><b>Connect TMDB</b><span>Free personal key from themoviedb.org powers search, cast and platforms.</span></li>
+        <li><b>Install in Stremio</b><span>One click. Your rows appear under Discover and on the Board.</span></li>
+      </ol>
+      <a class="btn primary lg" href="/configure?new=1">Get started →</a>
+    </section>
+  </main>
+
+  <footer class="foot">Streamlol is GPL-2.0 open source · not affiliated with Stremio or TMDB · film data by TMDB & Cinemeta</footer>
+
+  <script>
+    (function () {
+      var form = document.getElementById('existing-form');
+      var input = document.getElementById('existing-input');
+      var error = document.getElementById('existing-error');
+      document.getElementById('open-existing').onclick = function () {
+        form.hidden = !form.hidden;
+        if (!form.hidden) input.focus();
+      };
+      form.onsubmit = function (event) {
+        event.preventDefault();
+        var match = /[a-f0-9]{24}/.exec(input.value.trim());
+        if (!match) { error.textContent = 'That doesn\u2019t contain a Streamlol library token.'; return; }
+        location.href = '/' + match[0] + '/';
+      };
+    })();
+  </script>
+</body>
+</html>

@@ -7,6 +7,7 @@ const { discover, reference } = require('./discover');
 const { credentialFor, credentialSource, verifyCredential } = require('./tmdb');
 const { details, suggestions, personFilms } = require('./details');
 const { searchScopes } = require('./scopes');
+const stremio = require('./stremio');
 const { createInterface } = require('./manifest');
 const { configurePage } = require('./configurePage');
 const { appPage } = require('./appPage');
@@ -24,6 +25,22 @@ function readToken(raw) {
     return null;
 }
 
+const TOKEN_KEY = 'streamlol_token';
+const WELCOME = path.join(__dirname, '..', 'public', 'shelves', 'welcome.html');
+const ONE_YEAR_S = 365 * 24 * 60 * 60;
+
+function rememberedToken(req) {
+    const header = req.get('cookie') || '';
+    const match = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${TOKEN_KEY}=`));
+    const value = match ? decodeURIComponent(match.slice(TOKEN_KEY.length + 1)) : '';
+    return TOKEN_RE.test(value) ? value : null;
+}
+
+function rememberToken(req, res, token) {
+    const secure = (req.get('x-forwarded-proto') || req.protocol || '').startsWith('https') ? '; Secure' : '';
+    res.append('Set-Cookie', `${TOKEN_KEY}=${token}; Max-Age=${ONE_YEAR_S}; Path=/; SameSite=Lax${secure}`);
+}
+
 function asyncRoute(handler) {
     return (req, res, next) => {
         Promise.resolve(handler(req, res)).catch(next);
@@ -32,7 +49,11 @@ function asyncRoute(handler) {
 
 function publicLibrary(library) {
     const { tmdbToken, ...settings } = library.settings;
-    return { ...library, settings: { ...settings, tmdb: credentialSource(library) } };
+    return {
+        ...library,
+        settings: { ...settings, tmdb: credentialSource(library) },
+        stremio: stremio.publicStatus(library.stremio),
+    };
 }
 
 function publicUrl(req, token, suffix) {
@@ -65,7 +86,12 @@ function createApp() {
     }));
 
     app.get('/', (req, res) => {
-        res.redirect('/configure');
+        const token = rememberedToken(req);
+        if (token) {
+            res.redirect(`/${token}/`);
+            return;
+        }
+        res.sendFile(WELCOME);
     });
 
     app.get('/health', (req, res) => {
@@ -80,6 +106,11 @@ function createApp() {
     });
 
     app.get('/configure', (req, res) => {
+        const saved = req.query.new ? null : rememberedToken(req);
+        if (saved) {
+            res.redirect(`/${saved}/`);
+            return;
+        }
         const token = createToken();
         update(token, () => {}).then(() => {
             res.redirect(`/${token}/`);
@@ -93,6 +124,7 @@ function createApp() {
         const manifestUrl = publicUrl(req, token, 'manifest.json');
         const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
         return update(token, () => {}).then((library) => {
+            rememberToken(req, res, token);
             res.type('html').send(appPage({
                 token,
                 origin,
@@ -196,6 +228,28 @@ function createApp() {
             return;
         }
         res.json(await searchScopes(credential, req.query.q, req.query.type));
+    }));
+
+    app.post('/api/:token/stremio', asyncRoute(async (req, res) => {
+        await load(req.params.token);
+        const link = await stremio.connect(req.body || {});
+        await update(req.params.token, (draft) => {
+            draft.stremio = { authKey: link.authKey, email: link.email };
+        });
+        const result = await stremio.sync(req.params.token);
+        res.json({ result, library: publicLibrary(await load(req.params.token)) });
+    }));
+
+    app.post('/api/:token/stremio/sync', asyncRoute(async (req, res) => {
+        const result = await stremio.sync(req.params.token);
+        res.json({ result, library: publicLibrary(await load(req.params.token)) });
+    }));
+
+    app.delete('/api/:token/stremio', asyncRoute(async (req, res) => {
+        const library = await update(req.params.token, (draft) => {
+            delete draft.stremio;
+        });
+        res.json(publicLibrary(library));
     }));
 
     app.put('/api/:token/tmdb', asyncRoute(async (req, res) => {
@@ -354,6 +408,7 @@ function catalogRoute(req, res, next) {
         return;
     }
     load(token)
+        .then((library) => stremio.freshLibrary(token, library))
         .then((library) => {
             const iface = createInterface(library, resolveView);
             return iface.get('catalog', req.params.type, req.params.id, parseExtra(req.params.extra));

@@ -52,6 +52,14 @@
     installLink.href = boot.installUrl || boot.manifestUrl;
     settingsBtn.hidden = false;
 
+    const TOKEN_KEY = 'streamlol_token';
+    try { localStorage.setItem(TOKEN_KEY, boot.token); } catch { /* private mode */ }
+
+    function forgetDevice() {
+        try { localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
+        document.cookie = `${TOKEN_KEY}=; Max-Age=0; Path=/; SameSite=Lax`;
+    }
+
     async function api(path, options = {}) {
         const response = await fetch(`${boot.apiBase}${path}`, {
             method: options.method || 'GET',
@@ -300,40 +308,87 @@
         tabs.hidden = true;
         view.innerHTML = '';
         const box = el(`
-          <div class="setup">
-            <div class="eyebrow">Step 1</div>
-            <h1>Connect TMDB</h1>
-            <p>Streamlol uses The Movie Database for Discover, platforms, cast and suggestions. A free personal token is required.</p>
-            <ol>
-              <li>Create an account at <b>themoviedb.org/signup</b></li>
-              <li>Open <b>Settings → API</b> and request a Developer key</li>
-              <li>Copy the <b>API Read Access Token</b> (starts with eyJ) or the 32-character API Key</li>
-              <li>Paste it below</li>
+          <div class="onboard">
+            <ol class="progress">
+              <li class="done"><span>1</span>Library created</li>
+              <li class="now"><span>2</span>Connect TMDB</li>
+              <li><span>3</span>Install in Stremio</li>
             </ol>
-            <div class="row">
-              <input class="input grow" id="tmdb-input" type="password" placeholder="Paste TMDB token">
-              <button type="button" class="btn primary" id="tmdb-save">Save token</button>
-              <a class="btn ghost" href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Open TMDB API</a>
+            <div class="onboard-grid">
+              <div class="onboard-main">
+                <span class="eyebrow">Step 2 of 3</span>
+                <h1>Connect The Movie Database</h1>
+                <p class="lede">TMDB powers search, directors & cast, collections, platforms and suggestions. A personal key is free and takes a minute.</p>
+                <form class="key-form" id="tmdb-form">
+                  <input class="input grow mono" id="tmdb-input" type="password" autocomplete="off" spellcheck="false" placeholder="eyJhbGciOi…  or 32-character API key">
+                  <button type="submit" class="btn primary" id="tmdb-save">Connect</button>
+                </form>
+                <p class="error" id="tmdb-error"></p>
+                <p class="muted small">Stored with this library only — never shared, never shown again.</p>
+              </div>
+              <aside class="onboard-help">
+                <div class="fsec-label">Get a key</div>
+                <ol class="howto">
+                  <li>Sign up at <a href="https://www.themoviedb.org/signup" target="_blank" rel="noopener">themoviedb.org</a></li>
+                  <li>Go to <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Settings → API</a> and create a Developer key</li>
+                  <li>Copy the <b>API Read Access Token</b> (or the API Key)</li>
+                </ol>
+                <a class="btn ghost sm" href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">Open TMDB API settings ↗</a>
+              </aside>
             </div>
-            <p class="error" id="tmdb-error"></p>
-            <p class="muted small">Your token stays on this addon server for this library only.</p>
+            <div class="onboard-foot">
+              <span class="muted small">This device will remember your library. Your private link:</span>
+              <code class="mono small">${escapeHtml(location.origin)}/${escapeHtml(boot.token)}/</code>
+            </div>
           </div>
         `);
         view.appendChild(box);
-        box.querySelector('#tmdb-save').onclick = async () => {
-            const token = box.querySelector('#tmdb-input').value.trim();
+        const input = box.querySelector('#tmdb-input');
+        input.focus();
+        box.querySelector('#tmdb-form').onsubmit = async (event) => {
+            event.preventDefault();
+            const token = input.value.trim();
             const err = box.querySelector('#tmdb-error');
+            const save = box.querySelector('#tmdb-save');
             if (!token) { err.textContent = 'Paste the token first.'; return; }
-            err.textContent = 'Checking with TMDB…';
+            err.textContent = '';
+            save.disabled = true;
+            save.textContent = 'Checking…';
             try {
                 await api('/tmdb', { method: 'PUT', body: { token } });
                 await reload();
                 await loadReference();
                 await search();
+                showInstallPrompt();
             } catch (error) {
                 err.textContent = error.message;
+                save.disabled = false;
+                save.textContent = 'Connect';
             }
         };
+    }
+
+    function showInstallPrompt() {
+        const backdrop = el(`
+          <div class="modal-backdrop">
+            <div class="modal small onboard-done">
+              <span class="eyebrow">Step 3 of 3</span>
+              <h2>TMDB connected. Add Streamlol to Stremio</h2>
+              <p class="muted">Your library, lists and saved searches show up as <b>Shelves · …</b> rows on Stremio's Board and Discover — on every device, TV included.</p>
+              <div class="row end">
+                <button type="button" class="btn ghost" id="later">Later</button>
+                ${state.library.stremio ? '' : '<button type="button" class="btn" id="import">Import my Stremio library</button>'}
+                <a class="btn primary" id="install" href="${escapeHtml(boot.installUrl || boot.manifestUrl)}">Install in Stremio</a>
+              </div>
+            </div>
+          </div>
+        `);
+        modalRoot.appendChild(backdrop);
+        const done = () => backdrop.remove();
+        backdrop.querySelector('#later').onclick = done;
+        const importBtn = backdrop.querySelector('#import');
+        if (importBtn) importBtn.onclick = () => { done(); connectStremio(); };
+        backdrop.querySelector('#install').addEventListener('click', () => setTimeout(done, 300));
     }
 
     // ---------- cards ----------
@@ -592,6 +647,15 @@
 
     function renderDiscover() {
         const f = state.filters;
+        if (!state.library.stremio && !Object.keys(state.library.films || {}).length) {
+            const nudge = el(`
+              <div class="nudge">
+                <span><b>Your library is empty.</b> Bring in everything from your Stremio account.</span>
+              </div>
+            `);
+            nudge.appendChild(button('Import from Stremio', 'btn primary sm', connectStremio));
+            view.appendChild(nudge);
+        }
         view.appendChild(commandBar());
 
         if (f.scope) {
@@ -772,9 +836,186 @@
         return drawer;
     }
 
+    // ---------- stremio sync ----------
+
+    const STALE_MS = 15 * 60 * 1000;
+    let syncing = false;
+
+    function timeAgo(time) {
+        if (!time) return 'never';
+        const minutes = Math.round((Date.now() - time) / 60000);
+        if (minutes < 1) return 'just now';
+        if (minutes < 60) return `${minutes}m ago`;
+        const hours = Math.round(minutes / 60);
+        if (hours < 48) return `${hours}h ago`;
+        return `${Math.round(hours / 24)}d ago`;
+    }
+
+    function syncSummary(result) {
+        if (!result) return 'Synced';
+        const parts = [];
+        if (result.added) parts.push(`${result.added} added`);
+        if (result.viewed) parts.push(`${result.viewed} marked viewed`);
+        if (result.removed) parts.push(`${result.removed} removed`);
+        return parts.length ? `Stremio sync: ${parts.join(' · ')}` : 'Stremio sync: already up to date';
+    }
+
+    async function syncStremio({ quiet = false } = {}) {
+        if (syncing) return;
+        syncing = true;
+        render();
+        try {
+            const payload = await api('/stremio/sync', { method: 'POST' });
+            state.library = payload.library;
+            if (!quiet || payload.result.added || payload.result.viewed) toast(syncSummary(payload.result));
+        } catch (error) {
+            await reload().catch(() => {});
+            if (!quiet) toast(error.message);
+        } finally {
+            syncing = false;
+            render();
+        }
+    }
+
+    function autoSync() {
+        const link = state.library && state.library.stremio;
+        if (!link || link.error) return;
+        if (!link.lastSync || Date.now() - link.lastSync > STALE_MS) syncStremio({ quiet: true });
+    }
+
+    function connectStremio() {
+        const backdrop = el(`
+          <div class="modal-backdrop">
+            <div class="modal small">
+              <button type="button" class="btn ghost icon modal-close" aria-label="Close">✕</button>
+              <span class="eyebrow">Stremio account</span>
+              <h2>Bring your Stremio library</h2>
+              <p class="muted small">Imports your Library and watched history, then keeps syncing. Streamlol only reads — it never changes your Stremio account.</p>
+              <div class="seg tabs-auth" style="margin:0.75rem 0 1rem">
+                <button type="button" class="seg-item on" data-mode="password">Email & password</button>
+                <button type="button" class="seg-item" data-mode="key">Google / Facebook / Apple</button>
+              </div>
+              <form id="stremio-form">
+                <div data-pane="password" class="stack">
+                  <input class="input wide" name="email" type="email" autocomplete="username" placeholder="Stremio email">
+                  <input class="input wide" name="password" type="password" autocomplete="current-password" placeholder="Password">
+                  <p class="muted small">Your password goes straight to Stremio to get a session key and is never stored.</p>
+                </div>
+                <div data-pane="key" class="stack" hidden>
+                  <ol class="howto">
+                    <li>Open <a href="https://web.stremio.com" target="_blank" rel="noopener">web.stremio.com</a> and sign in</li>
+                    <li>Press <b>F12</b> → <b>Console</b>, paste this and press Enter:</li>
+                  </ol>
+                  <div class="snippet"><code class="mono">copy(JSON.parse(localStorage.profile).auth.key)</code><button type="button" class="btn ghost sm" id="copy-snippet">Copy</button></div>
+                  <p class="muted small">That copies your session key. Paste it here:</p>
+                  <input class="input wide mono" name="authKey" autocomplete="off" spellcheck="false" placeholder="Stremio auth key">
+                </div>
+                <p class="error" id="stremio-error"></p>
+                <div class="row end">
+                  <button type="button" class="btn ghost" id="cancel">Cancel</button>
+                  <button type="submit" class="btn primary" id="go">Connect & import</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        `);
+        modalRoot.appendChild(backdrop);
+        let mode = 'password';
+        const form = backdrop.querySelector('#stremio-form');
+        const close = () => backdrop.remove();
+        backdrop.querySelector('.modal-close').onclick = close;
+        backdrop.querySelector('#cancel').onclick = close;
+        backdrop.querySelectorAll('[data-mode]').forEach((tab) => {
+            tab.onclick = () => {
+                mode = tab.dataset.mode;
+                backdrop.querySelectorAll('[data-mode]').forEach((item) => item.classList.toggle('on', item === tab));
+                backdrop.querySelectorAll('[data-pane]').forEach((pane) => { pane.hidden = pane.dataset.pane !== mode; });
+                form.querySelector(mode === 'key' ? '[name=authKey]' : '[name=email]').focus();
+            };
+        });
+        backdrop.querySelector('#copy-snippet').onclick = async (event) => {
+            try {
+                await navigator.clipboard.writeText('copy(JSON.parse(localStorage.profile).auth.key)');
+                event.target.textContent = 'Copied ✓';
+            } catch { /* manual copy */ }
+        };
+        form.querySelector('[name=email]').focus();
+        form.onsubmit = async (event) => {
+            event.preventDefault();
+            const err = backdrop.querySelector('#stremio-error');
+            const go = backdrop.querySelector('#go');
+            const body = mode === 'key'
+                ? { authKey: form.authKey.value.trim() }
+                : { email: form.email.value.trim(), password: form.password.value };
+            err.textContent = '';
+            go.disabled = true;
+            go.textContent = 'Importing…';
+            try {
+                const payload = await api('/stremio', { method: 'POST', body });
+                state.library = payload.library;
+                close();
+                const { added, viewed } = payload.result;
+                toast(`Imported ${added} titles from Stremio${viewed ? ` · ${viewed} viewed` : ''}`);
+                if (state.active.kind === 'discover') state.active = { kind: 'library' };
+                render();
+            } catch (error) {
+                err.textContent = error.message;
+                go.disabled = false;
+                go.textContent = 'Connect & import';
+            }
+        };
+    }
+
+    function stremioBar() {
+        const link = state.library.stremio;
+        if (!link) return null;
+        const bar = el(`
+          <div class="sync-bar ${link.error ? 'warn' : ''}">
+            <span class="sync-dot ${syncing ? 'busy' : ''}"></span>
+            <span>${link.error
+                ? 'Stremio session expired'
+                : `Synced with Stremio${link.email ? ` · ${escapeHtml(link.email)}` : ''} · ${syncing ? 'syncing…' : timeAgo(link.lastSync)}`}</span>
+          </div>
+        `);
+        bar.appendChild(link.error
+            ? button('Reconnect', 'btn ghost sm', connectStremio)
+            : button(syncing ? 'Syncing…' : '↻ Sync', 'btn ghost sm', () => syncStremio()));
+        return bar;
+    }
+
+    function emptyShelf() {
+        const connected = Boolean(state.library.stremio);
+        if (connected || state.active.kind === 'reviewed' || state.active.kind === 'list') {
+            const text = {
+                library: 'Nothing in your Library yet. Add titles from Discover or your Stremio library.',
+                viewed: 'No viewed titles yet. Mark something viewed, or watch it in Stremio and sync.',
+                reviewed: 'No reviews yet. Open any title and give it a score.',
+                list: 'This list is empty. Open a title and use “Lists” to add it here.',
+            }[state.active.kind] || 'Nothing here yet.';
+            return el(`<div class="empty">${escapeHtml(text)}</div>`);
+        }
+        const card = el(`
+          <div class="import-card">
+            <div class="import-copy">
+              <span class="eyebrow">Start with what you already have</span>
+              <h2>Import your Stremio library</h2>
+              <p class="muted">Everything in your Stremio Library and your watched history lands here in seconds — and keeps syncing as you watch.</p>
+              <div class="row"></div>
+            </div>
+            <div class="import-art" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+          </div>
+        `);
+        const row = card.querySelector('.row');
+        row.appendChild(button('Connect Stremio →', 'btn primary', connectStremio));
+        row.appendChild(button('Browse Discover', 'btn ghost', () => { state.active = { kind: 'discover' }; render(); if (!state.results.length) search(); }));
+        return card;
+    }
+
     // ---------- shelves ----------
 
     function renderShelf() {
+        const bar = stremioBar();
+        if (bar) view.appendChild(bar);
         const toolbar = el('<div class="controls"></div>');
         const input = el(`<input class="input grow" placeholder="Filter this shelf" value="${escapeHtml(state.shelf.q)}">`);
         input.oninput = () => { state.shelf.q = input.value; renderShelfBody(); };
@@ -796,7 +1037,7 @@
         const q = state.shelf.q.toLowerCase();
         if (q) films = films.filter((film) => (film.title || '').toLowerCase().includes(q));
         if (!films.length) {
-            body.appendChild(el('<div class="empty">Nothing here yet. Use Discover, then open a title to add it.</div>'));
+            body.appendChild(q ? el('<div class="empty">No titles on this shelf match that.</div>') : emptyShelf());
         } else if (state.active.kind === 'viewed' && state.shelf.sort === 'recent') {
             calendarGroups(films).forEach((group) => {
                 body.appendChild(el(`<div class="month">${escapeHtml(group.label)}<span>${group.films.length}</span></div>`));
@@ -1072,13 +1313,58 @@
               </div>
               <div class="fsec-label" style="margin-top:1.25rem">Manifest</div>
               <input class="input wide mono" readonly value="${escapeHtml(boot.manifestUrl)}" onclick="this.select()">
-              <p class="muted small">Bookmark this page. Opening /configure again creates a new empty library.</p>
+              <div class="fsec-label" style="margin-top:1.25rem">Stremio account</div>
+              <div id="stremio-settings"></div>
+              <div class="fsec-label" style="margin-top:1.25rem">This device</div>
+              <p class="muted small">This browser remembers your library. Bookmark the link to open it elsewhere.</p>
+              <div class="row">
+                <button type="button" class="btn ghost sm" id="copy-link">Copy library link</button>
+                <a class="btn ghost sm" href="/configure?new=1" id="new-library">New empty library</a>
+                <button type="button" class="btn ghost sm danger" id="forget">Forget on this device</button>
+              </div>
               <p class="error" id="settings-error"></p>
             </div>
           </div>
         `);
         modalRoot.appendChild(backdrop);
         backdrop.querySelector('.modal-close').onclick = () => backdrop.remove();
+        const stremioBox = backdrop.querySelector('#stremio-settings');
+        const link = state.library.stremio;
+        if (link) {
+            stremioBox.appendChild(el(`<div class="kv"><span>${link.error ? 'Session expired' : `Connected${link.email ? ` · ${escapeHtml(link.email)}` : ''}`}</span><b class="mono small">synced ${timeAgo(link.lastSync)}</b></div>`));
+            const row = el('<div class="row"></div>');
+            row.appendChild(link.error
+                ? button('Reconnect', 'btn primary sm', () => { backdrop.remove(); connectStremio(); })
+                : button('↻ Sync now', 'btn ghost sm', () => { backdrop.remove(); syncStremio(); }));
+            row.appendChild(button('Disconnect', 'btn ghost sm danger', async () => {
+                if (!window.confirm('Stop syncing with Stremio? Imported titles stay in your library.')) return;
+                state.library = await api('/stremio', { method: 'DELETE' });
+                backdrop.remove();
+                render();
+            }));
+            stremioBox.appendChild(row);
+            stremioBox.appendChild(el('<p class="muted small">Syncs automatically every 15 minutes while you use Streamlol or browse your Shelves rows in Stremio.</p>'));
+        } else {
+            stremioBox.appendChild(el('<p class="muted small">Import your Stremio Library and watched history, and keep it in sync.</p>'));
+            stremioBox.appendChild(button('Connect Stremio', 'btn primary sm', () => { backdrop.remove(); connectStremio(); }));
+        }
+        const libraryLink = `${location.origin}/${boot.token}/`;
+        backdrop.querySelector('#copy-link').onclick = async (event) => {
+            try {
+                await navigator.clipboard.writeText(libraryLink);
+                event.target.textContent = 'Copied ✓';
+            } catch {
+                window.prompt('Your library link', libraryLink);
+            }
+        };
+        backdrop.querySelector('#new-library').onclick = (event) => {
+            if (!window.confirm('Start a new empty library on this device? Keep your current link if you want to come back.')) event.preventDefault();
+        };
+        backdrop.querySelector('#forget').onclick = () => {
+            if (!window.confirm('Forget this library on this device? You will need the link to open it again.')) return;
+            forgetDevice();
+            location.href = '/';
+        };
         backdrop.querySelector('#save-tmdb').onclick = async () => {
             const token = backdrop.querySelector('#set-tmdb').value.trim();
             if (!token) return;
@@ -1133,6 +1419,7 @@
                 await search();
             }
             render();
+            autoSync();
         } catch (error) {
             view.innerHTML = `<div class="empty error">${escapeHtml(error.message)}</div>`;
         }
