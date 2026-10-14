@@ -4,6 +4,7 @@ const { cinemetaMeta } = require('./cinemeta');
 const { mapPool } = require('./discover');
 
 const API = 'https://api.strem.io/api';
+const ADDON_ID = 'com.streamlol.shelves';
 const IMDB_RE = /^tt\d{4,}$/;
 const AUTO_SYNC_MS = 15 * 60 * 1000;
 const ENRICH_LIMIT = 400;
@@ -189,7 +190,81 @@ function publicStatus(link) {
         lastSync: link.lastSync || null,
         lastResult: link.lastResult || null,
         error: link.error || null,
+        addon: link.addon || null,
     };
+}
+
+function transportOf(addon) {
+    return String((addon && (addon.transportUrl || addon.transport_url || addon.url)) || '');
+}
+
+function findShelvesAddon(addons, manifestUrl) {
+    const wanted = String(manifestUrl || '').replace(/\/$/, '');
+    const list = Array.isArray(addons) ? addons : [];
+    const exact = list.find((addon) => {
+        const url = transportOf(addon).replace(/\/$/, '');
+        return wanted && (url === wanted || url.startsWith(`${wanted}?`));
+    });
+    if (exact) return exact;
+    return list.find((addon) => {
+        const id = addon.manifest && addon.manifest.id;
+        return id === ADDON_ID || transportOf(addon).includes('/manifest.json');
+    }) || null;
+}
+
+async function addonCollection(authKey, { addFromURL } = {}) {
+    const body = { type: 'AddonCollectionGet', authKey, update: true };
+    if (addFromURL && addFromURL.length) body.addFromURL = addFromURL;
+    const result = await call('addonCollectionGet', body);
+    return (result && result.addons) || result || [];
+}
+
+function normalizeManifestUrl(url) {
+    return String(url || '').replace(/^stremio:\/\//, 'https://').replace(/\/$/, '');
+}
+
+function isThisLibraryAddon(addon, manifestUrl) {
+    const wanted = normalizeManifestUrl(manifestUrl);
+    const url = transportOf(addon).replace(/\/$/, '');
+    if (!wanted || !url) return false;
+    return url === wanted || url.startsWith(`${wanted}?`);
+}
+
+// Install this library's Shelves addon when missing; refresh it when already present
+// so Board rows update without asking the user to reinstall.
+async function syncAddon(authKey, manifestUrl) {
+    if (!authKey || !manifestUrl) return { installed: false, updated: false };
+    const httpsUrl = normalizeManifestUrl(manifestUrl);
+    let addons = await addonCollection(authKey);
+    const wasInstalled = addons.some((addon) => isThisLibraryAddon(addon, httpsUrl));
+    addons = await addonCollection(authKey, { addFromURL: [httpsUrl] });
+    const match = addons.find((addon) => isThisLibraryAddon(addon, httpsUrl))
+        || findShelvesAddon(addons, httpsUrl);
+    const installed = Boolean(match && isThisLibraryAddon(match, httpsUrl));
+    return {
+        installed,
+        updated: installed,
+        wasInstalled,
+        transportUrl: installed ? (transportOf(match) || httpsUrl) : null,
+    };
+}
+
+async function refreshAddonStatus(token, manifestUrl) {
+    const library = await load(token);
+    const link = library.stremio;
+    if (!link || !link.authKey || !manifestUrl) return null;
+    try {
+        const httpsUrl = normalizeManifestUrl(manifestUrl);
+        const addons = await addonCollection(link.authKey);
+        const match = addons.find((addon) => isThisLibraryAddon(addon, httpsUrl));
+        const addon = { installed: Boolean(match), transportUrl: match ? transportOf(match) : null };
+        await update(token, (draft) => {
+            if (draft.stremio) draft.stremio.addon = addon;
+        });
+        return addon;
+    } catch {
+        return link.addon || null;
+    }
 }
 
 module.exports = {
@@ -201,4 +276,8 @@ module.exports = {
     isStale,
     freshLibrary,
     publicStatus,
+    addonCollection,
+    findShelvesAddon,
+    syncAddon,
+    refreshAddonStatus,
 };

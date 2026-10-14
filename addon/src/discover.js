@@ -257,17 +257,14 @@ function titleMatches(item, q) {
         .some((value) => typeof value === 'string' && value.toLowerCase().includes(needle));
 }
 
-// Bayesian average so a 9.0 with 12 votes doesn't outrank a 8.5 with 20k.
-function weightedScore(item) {
-    const votes = item.vote_count || 0;
-    const prior = 60;
-    return (votes / (votes + prior)) * (item.vote_average || 0) + (prior / (votes + prior)) * 6.5;
-}
-
 function sortPool(items, sort) {
     const sorted = items.slice();
-    if (sort === 'rating') sorted.sort((a, b) => weightedScore(b) - weightedScore(a));
-    else if (sort === 'newest') sorted.sort((a, b) => dateOf(b).localeCompare(dateOf(a)));
+    // Pre-rank by TMDB vote_average (not Bayesian) so top-rated candidates are closer
+    // to the IMDb order we apply after enrichment.
+    if (sort === 'rating') {
+        sorted.sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0)
+            || (b.vote_count || 0) - (a.vote_count || 0));
+    } else if (sort === 'newest') sorted.sort((a, b) => dateOf(b).localeCompare(dateOf(a)));
     else if (sort === 'votes') sorted.sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
     else if (sort === 'list') sorted.sort((a, b) => (a.listOrder || 0) - (b.listOrder || 0));
     else sorted.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
@@ -305,6 +302,7 @@ async function pooledDiscover(credential, library, filters, idFilters, ctx, curs
     const pool = await scopePool(credential, filters.scope, filters.type);
     const minVotes = Number(filters.minVotes) || 0;
     const releasedOnly = filters.sort === 'rating' || filters.sort === 'votes';
+    const rating = filters.sort === 'rating';
     const candidates = sortPool(pool.filter((item) => {
         if (!item.poster_path) return false;
         if (!matchesLocal(item, idFilters)) return false;
@@ -316,8 +314,31 @@ async function pooledDiscover(credential, library, filters, idFilters, ctx, curs
     }), filters.sort);
 
     const enrich = enricher(credential, library, filters, { ...ctx, checkPlatforms: true });
-    const results = [];
     let offset = Number(cursor) || 0;
+
+    // Top rated: enrich a wider window, sort by IMDb, then paginate so ratings stay sequential.
+    if (rating) {
+        const window = Math.min(candidates.length, offset + PAGE_TARGET * 4);
+        const batch = [];
+        let cursorAt = 0;
+        while (batch.length < window && cursorAt < candidates.length) {
+            const slice = candidates.slice(cursorAt, cursorAt + 10);
+            cursorAt += slice.length;
+            const enriched = await mapPool(slice, 5, enrich);
+            batch.push(...enriched.filter(Boolean));
+        }
+        batch.sort(byImdbDesc);
+        const results = batch.slice(offset, offset + PAGE_TARGET);
+        const next = offset + PAGE_TARGET;
+        return {
+            source: 'tmdb',
+            scope: { ...filters.scope, label: scopeLabel(filters.scope, filters.type), total: candidates.length },
+            results,
+            nextCursor: next < batch.length || cursorAt < candidates.length ? String(next) : null,
+        };
+    }
+
+    const results = [];
     const budget = offset + PAGE_TARGET * 6;
     while (results.length < PAGE_TARGET && offset < candidates.length && offset < budget) {
         const slice = candidates.slice(offset, offset + 10);
@@ -351,30 +372,63 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
     const ctx = { ref, genreNames, wantedPlatforms, hideViewed };
     if (isPooled(scope)) return pooledDiscover(credential, library, filters, idFilters, ctx, cursor);
 
-    const results = [];
-    let page = Number(cursor) || 1;
-    let totalPages = page;
-    let pagesUsed = 0;
+    const rating = filters.sort === 'rating';
     const useTopRated = ratingCanUseTopRated(filters, wantedPlatforms);
     const titleSearch = filters.q && !scope;
     const today = new Date().toISOString().slice(0, 10);
     const enrich = enricher(credential, library, filters, { ...ctx, checkPlatforms: titleSearch });
 
+    // Top rated: gather several TMDB pages, enrich to IMDb, sort, then page by offset.
+    // Sorting only the current TMDB page left ratings non-sequential after IMDb remap.
+    if (rating && !titleSearch) {
+        const skip = Number(cursor) || 0;
+        const gather = skip + PAGE_TARGET * 3;
+        const pool = [];
+        let page = 1;
+        let totalPages = 1;
+        let pagesUsed = 0;
+        const pageBudget = MAX_SOURCE_PAGES * 3;
+        while (pool.length < gather && pagesUsed < pageBudget && page <= totalPages) {
+            const payload = useTopRated
+                ? await tmdb(credential, `/${kind}/top_rated`, { page, language: 'en-US' })
+                : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
+            totalPages = Math.min(payload.total_pages || page, 500);
+            const candidates = (payload.results || []).filter((item) => {
+                if (!matchesLocal(item, idFilters)) return false;
+                if (scope && !titleMatches(item, filters.q)) return false;
+                const date = dateOf(item);
+                if (date && date > today) return false;
+                return true;
+            });
+            const enriched = await mapPool(candidates, 5, enrich);
+            pool.push(...enriched.filter(Boolean));
+            pagesUsed += 1;
+            page += 1;
+        }
+        pool.sort(byImdbDesc);
+        const results = pool.slice(skip, skip + PAGE_TARGET);
+        const next = skip + PAGE_TARGET;
+        return {
+            source: 'tmdb',
+            scope: scope ? { ...scope, label: scopeLabel(scope, type) } : null,
+            results,
+            nextCursor: next < pool.length || page <= totalPages ? String(next) : null,
+        };
+    }
+
+    const results = [];
+    let page = Number(cursor) || 1;
+    let totalPages = page;
+    let pagesUsed = 0;
+
     while (results.length < PAGE_TARGET && pagesUsed < MAX_SOURCE_PAGES && page <= totalPages) {
         const payload = titleSearch
             ? await tmdb(credential, `/search/${kind}`, { query: filters.q, page, include_adult: false })
-            : useTopRated
-                ? await tmdb(credential, `/${kind}/top_rated`, { page, language: 'en-US' })
-                : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
+            : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
         totalPages = Math.min(payload.total_pages || page, 500);
         const candidates = (payload.results || []).filter((item) => {
             if (!matchesLocal(item, idFilters)) return false;
             if (scope && !titleMatches(item, filters.q)) return false;
-            // Top rated / rating lists still include unreleased titles; drop anything after today.
-            if (filters.sort === 'rating') {
-                const date = dateOf(item);
-                if (date && date > today) return false;
-            }
             return true;
         });
         const enriched = await mapPool(candidates, 5, enrich);
@@ -383,7 +437,6 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
         page += 1;
     }
 
-    if (filters.sort === 'rating') results.sort(byImdbDesc);
     return {
         source: 'tmdb',
         scope: scope ? { ...scope, label: scopeLabel(scope, type) } : null,

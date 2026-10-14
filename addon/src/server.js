@@ -264,6 +264,22 @@ function createApp() {
         res.json({ ok: true });
     });
 
+    async function attachAddon(token, req, authKey) {
+        const manifestUrl = publicUrl(req, token, 'manifest.json');
+        try {
+            const addon = await stremio.syncAddon(authKey, manifestUrl);
+            await update(token, (draft) => {
+                if (draft.stremio) draft.stremio.addon = {
+                    installed: Boolean(addon.installed),
+                    transportUrl: addon.transportUrl || null,
+                };
+            });
+            return addon;
+        } catch {
+            return null;
+        }
+    }
+
     app.post('/api/:token/stremio', asyncRoute(async (req, res) => {
         await load(req.params.token);
         const body = req.body || {};
@@ -281,15 +297,39 @@ function createApp() {
         }
         rememberStremio(req, res, link);
         await update(req.params.token, (draft) => {
-            draft.stremio = { authKey: link.authKey, email: link.email };
+            draft.stremio = { authKey: link.authKey, email: link.email, addon: draft.stremio && draft.stremio.addon };
         });
         const result = await stremio.sync(req.params.token);
-        res.json({ result, library: publicLibrary(await load(req.params.token)) });
+        const addon = await attachAddon(req.params.token, req, link.authKey);
+        res.json({ result, addon, library: publicLibrary(await load(req.params.token)) });
     }));
 
     app.post('/api/:token/stremio/sync', asyncRoute(async (req, res) => {
         const result = await stremio.sync(req.params.token);
-        res.json({ result, library: publicLibrary(await load(req.params.token)) });
+        const library = await load(req.params.token);
+        let addon = null;
+        if (library.stremio && library.stremio.authKey) {
+            addon = await attachAddon(req.params.token, req, library.stremio.authKey);
+        }
+        res.json({ result, addon, library: publicLibrary(await load(req.params.token)) });
+    }));
+
+    // Push the current Shelves manifest into Stremio (install if missing, refresh if present).
+    app.post('/api/:token/stremio/addon', asyncRoute(async (req, res) => {
+        const library = await load(req.params.token);
+        if (!library.stremio || !library.stremio.authKey) {
+            const error = new Error('Connect Stremio first');
+            error.status = 400;
+            throw error;
+        }
+        const addon = await stremio.syncAddon(library.stremio.authKey, publicUrl(req, req.params.token, 'manifest.json'));
+        await update(req.params.token, (draft) => {
+            if (draft.stremio) draft.stremio.addon = {
+                installed: Boolean(addon.installed),
+                transportUrl: addon.transportUrl || null,
+            };
+        });
+        res.json({ addon, library: publicLibrary(await load(req.params.token)) });
     }));
 
     app.delete('/api/:token/stremio', asyncRoute(async (req, res) => {

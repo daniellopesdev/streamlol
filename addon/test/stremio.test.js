@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { emptyLibrary } = require('../src/store');
-const { stremioItems, mergeStremio } = require('../src/stremio');
+const { stremioItems, mergeStremio, findShelvesAddon } = require('../src/stremio');
 
 const raw = [
     { _id: 'tt0111161', type: 'movie', name: 'Shawshank', poster: 'https://p/1.jpg', removed: false, temp: false, _ctime: '2024-01-02T00:00:00Z', state: { timesWatched: 1, lastWatched: '2024-02-03T00:00:00Z' } },
@@ -38,6 +38,16 @@ test('mergeStremio adds, upgrades to viewed, never downgrades', () => {
     const second = mergeStremio(library, stremioItems(watchedNow));
     assert.equal(second.added, 0);
     assert.equal(library.status.tt0068646, 'viewed');
+});
+
+test('findShelvesAddon matches this library manifest URL', () => {
+    const url = 'https://streamlol.vercel.app/abc123abc123abc123abc123/manifest.json';
+    const addons = [
+        { transportUrl: 'https://other/manifest.json', manifest: { id: 'com.other' } },
+        { transportUrl: `${url}?foo=1`, manifest: { id: 'com.streamlol.shelves' } },
+    ];
+    assert.equal(findShelvesAddon(addons, url).manifest.id, 'com.streamlol.shelves');
+    assert.equal(findShelvesAddon([], url), null);
 });
 
 test('titles that leave Stremio are removed only if untouched', () => {

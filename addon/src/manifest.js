@@ -1,9 +1,24 @@
+const crypto = require('crypto');
 const { addonBuilder } = require('stremio-addon-sdk');
 const { filmsForShelf, genreOptions, shelfMetas } = require('./catalog');
 
 const ADDON_ID = 'com.streamlol.shelves';
 const VERSION = '0.2.1';
 const BOARD_PREFIX = 'Shelves';
+
+// Content-hashed patch so Stremio refreshes Board catalogs after shelf edits
+// without asking the user to uninstall/reinstall the addon.
+function manifestVersion(library) {
+    const sig = JSON.stringify({
+        lists: (library.lists || []).map((list) => [list.id, list.name, (list.filmIds || []).length, list.order]),
+        views: (library.views || []).map((view) => [view.id, view.name, view.filters]),
+        films: Object.keys(library.films || {}).length,
+        viewed: Object.values(library.status || {}).filter((status) => status === 'viewed').length,
+        reviewed: Object.keys(library.reviews || {}).length,
+    });
+    const patch = parseInt(crypto.createHash('sha1').update(sig).digest('hex').slice(0, 6), 16);
+    return `0.2.${patch}`;
+}
 
 function boardName(label) {
     const clean = String(label || 'List').trim().slice(0, 48);
@@ -67,7 +82,7 @@ function catalogsFor(library, includeGenres) {
 function buildManifest(library, includeGenres) {
     return {
         id: ADDON_ID,
-        version: VERSION,
+        version: manifestVersion(library),
         name: 'Streamlol Shelves',
         description: 'Personal shelves on your Stremio Board: Library, Viewed, Reviewed, lists, and saved Discover filters.',
         resources: ['catalog'],

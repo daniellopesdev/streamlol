@@ -368,17 +368,59 @@
         };
     }
 
+    function addonInstalled() {
+        return Boolean(state.library.stremio && state.library.stremio.addon && state.library.stremio.addon.installed);
+    }
+
+    function setInstallLink() {
+        if (!installLink) return;
+        if (addonInstalled()) {
+            installLink.textContent = 'Update Shelves';
+            installLink.href = '#';
+            installLink.onclick = (event) => {
+                event.preventDefault();
+                pushAddonToStremio();
+            };
+        } else {
+            installLink.textContent = 'Install in Stremio';
+            installLink.href = boot.installUrl || boot.manifestUrl;
+            installLink.onclick = null;
+        }
+    }
+
+    async function pushAddonToStremio() {
+        if (!state.library.stremio) {
+            connectStremio();
+            return;
+        }
+        try {
+            const payload = await api('/stremio/addon', { method: 'POST' });
+            state.library = payload.library;
+            setInstallLink();
+            toast(payload.addon && payload.addon.wasInstalled === false
+                ? 'Shelves installed in Stremio — open the Board'
+                : 'Shelves updated in Stremio — open the Board');
+        } catch (error) {
+            toast(error.message);
+        }
+    }
+
     function showInstallPrompt() {
+        const installed = addonInstalled();
         const backdrop = el(`
           <div class="modal-backdrop">
             <div class="modal small onboard-done">
               <span class="eyebrow">Step 3 of 3</span>
-              <h2>TMDB connected. Add Streamlol to Stremio</h2>
-              <p class="muted">Your library, lists and saved searches show up as <b>Shelves · …</b> rows on Stremio's Board and Discover — on every device, TV included.</p>
+              <h2>${installed ? 'TMDB connected. Shelves are in Stremio' : 'TMDB connected. Add Shelves to Stremio'}</h2>
+              <p class="muted">${installed
+            ? 'Your Board already has <b>Shelves · …</b> rows. Edits here update them automatically — no need to install again.'
+            : 'Your library, lists and saved searches show up as <b>Shelves · …</b> rows on Stremio\'s Board and Discover — on every device, TV included.'}</p>
               <div class="row end">
                 <button type="button" class="btn ghost" id="later">Later</button>
                 ${state.library.stremio ? '' : '<button type="button" class="btn" id="import">Import my Stremio library</button>'}
-                <a class="btn primary" id="install" href="${escapeHtml(boot.installUrl || boot.manifestUrl)}">Install in Stremio</a>
+                ${installed
+            ? '<button type="button" class="btn primary" id="update">Update Shelves</button>'
+            : `<a class="btn primary" id="install" href="${escapeHtml(boot.installUrl || boot.manifestUrl)}">Install in Stremio</a>`}
               </div>
             </div>
           </div>
@@ -388,7 +430,10 @@
         backdrop.querySelector('#later').onclick = done;
         const importBtn = backdrop.querySelector('#import');
         if (importBtn) importBtn.onclick = () => { done(); connectStremio(); };
-        backdrop.querySelector('#install').addEventListener('click', () => setTimeout(done, 300));
+        const install = backdrop.querySelector('#install');
+        if (install) install.addEventListener('click', () => setTimeout(done, 300));
+        const updateBtn = backdrop.querySelector('#update');
+        if (updateBtn) updateBtn.onclick = async () => { await pushAddonToStremio(); done(); };
     }
 
     // ---------- cards ----------
@@ -672,9 +717,13 @@
             `);
             const actions = banner.querySelector('.scope-actions');
             if (f.scope.kind === 'person') {
-                const other = f.scope.role === 'crew' ? 'cast' : 'crew';
-                const otherLabel = other === 'crew' ? (state.type === 'series' ? 'As creator' : 'As director') : 'As actor';
-                actions.appendChild(button(otherLabel, 'btn ghost sm', () => applyScope({ ...f.scope, role: other }, { sort: f.sort })));
+                const crewLabel = state.type === 'series' ? 'Creator' : 'Director';
+                const roles = [['crew', crewLabel], ['cast', 'Actor']];
+                const current = f.scope.role === 'crew' ? 'crew' : 'cast';
+                actions.appendChild(segmented(roles, current, (role) => {
+                    if (role === current) return;
+                    applyScope({ ...f.scope, role }, { sort: f.sort });
+                }, 'sm'));
             }
             actions.appendChild(button('✕ Clear', 'btn ghost sm', clearScope));
             view.appendChild(banner);
@@ -986,8 +1035,15 @@
                 state.library = payload.library;
                 close();
                 const { added, viewed } = payload.result;
-                toast(`Imported ${added} titles from Stremio${viewed ? ` · ${viewed} viewed` : ''}`);
-                if (state.active.kind === 'discover') state.active = { kind: 'library' };
+                const addon = payload.addon || (state.library.stremio && state.library.stremio.addon);
+                const parts = [`Imported ${added} titles from Stremio${viewed ? ` · ${viewed} viewed` : ''}`];
+                if (addon && addon.installed) {
+                    parts.push(addon.wasInstalled ? 'Shelves updated on Board' : 'Shelves added to Board');
+                }
+                toast(parts.join(' · '));
+                // Prefer our Shelves library tab over Discover after a Stremio connect.
+                state.active = { kind: 'library' };
+                setInstallLink();
                 render();
                 return true;
             } catch (error) {
@@ -1319,10 +1375,10 @@
         if (!name) return;
         const list = await api('/lists', { method: 'POST', body: { name } });
         if (film) await api(`/lists/${list.id}/films`, { method: 'POST', body: { imdbId: film.imdbId, film } });
-        await reload();
         state.listsOpen = true;
         state.active = { kind: 'list', id: list.id };
         modalRoot.innerHTML = '';
+        await afterShelfEdit(`List “${list.name}” created`);
         render();
     }
 
@@ -1332,7 +1388,7 @@
         const name = await promptName('Rename list', list.name);
         if (!name) return;
         await api(`/lists/${list.id}`, { method: 'PATCH', body: { name } });
-        await reload();
+        await afterShelfEdit(`Renamed to “${name}”`);
         render();
     }
 
@@ -1341,7 +1397,7 @@
         if (!list || !window.confirm(`Delete "${list.name}"? Titles stay in Library.`)) return;
         await api(`/lists/${list.id}`, { method: 'DELETE' });
         state.active = { kind: 'library' };
-        await reload();
+        await afterShelfEdit(`Deleted “${list.name}”`);
         render();
     }
 
@@ -1357,8 +1413,7 @@
         const name = await promptName('Save as Stremio Board row', suggested);
         if (!name) return;
         await api('/views', { method: 'POST', body: { name, filters: { ...state.filters, type: state.type } } });
-        await reload();
-        toast(`Saved “${name}”. Refresh the addon in Stremio to see the new row.`);
+        await afterShelfEdit(`Saved “${name}”`);
     }
 
     async function openSettings() {
@@ -1393,21 +1448,30 @@
         const stremioBox = backdrop.querySelector('#stremio-settings');
         const link = state.library.stremio;
         if (link) {
-            stremioBox.appendChild(el(`<div class="kv"><span>${link.error ? 'Session expired' : `Connected${link.email ? ` · ${escapeHtml(link.email)}` : ''}`}</span><b class="mono small">synced ${timeAgo(link.lastSync)}</b></div>`));
+            const shelves = link.addon && link.addon.installed ? 'Shelves on Board' : 'Shelves not installed';
+            stremioBox.appendChild(el(`<div class="kv"><span>${link.error ? 'Session expired' : `Connected${link.email ? ` · ${escapeHtml(link.email)}` : ''}`}</span><b class="mono small">${shelves} · synced ${timeAgo(link.lastSync)}</b></div>`));
             const row = el('<div class="row"></div>');
             row.appendChild(link.error
                 ? button('Reconnect', 'btn primary sm', () => { backdrop.remove(); connectStremio(); })
                 : button('↻ Sync now', 'btn ghost sm', () => { backdrop.remove(); syncStremio(); }));
+            if (!link.error) {
+                row.appendChild(button(link.addon && link.addon.installed ? 'Update Shelves' : 'Install Shelves', 'btn ghost sm', async () => {
+                    backdrop.remove();
+                    await pushAddonToStremio();
+                    render();
+                }));
+            }
             row.appendChild(button('Disconnect', 'btn ghost sm danger', async () => {
                 if (!window.confirm('Stop syncing with Stremio? Imported titles stay in your library.')) return;
                 state.library = await api('/stremio', { method: 'DELETE' });
+                setInstallLink();
                 backdrop.remove();
                 render();
             }));
             stremioBox.appendChild(row);
-            stremioBox.appendChild(el('<p class="muted small">Syncs automatically every 15 minutes while you use Streamlol or browse your Shelves rows in Stremio.</p>'));
+            stremioBox.appendChild(el('<p class="muted small">Syncs Library/watched into Streamlol. Board rows are <b>Shelves · …</b> — Update Shelves refreshes them without reinstalling.</p>'));
         } else {
-            stremioBox.appendChild(el('<p class="muted small">Import your Stremio Library and watched history, and keep it in sync.</p>'));
+            stremioBox.appendChild(el('<p class="muted small">Import your Stremio Library and watched history, and keep Shelves on your Board in sync.</p>'));
             stremioBox.appendChild(button('Connect Stremio', 'btn primary sm', () => { backdrop.remove(); connectStremio(); }));
         }
         const libraryLink = `${location.origin}/${boot.token}/`;
@@ -1473,9 +1537,24 @@
         if (event.key === 'Escape' && !typing && modalRoot.lastElementChild) modalRoot.lastElementChild.remove();
     });
 
+    async function afterShelfEdit(message) {
+        await reload();
+        if (state.library.stremio && !state.library.stremio.error) {
+            try {
+                const payload = await api('/stremio/addon', { method: 'POST' });
+                state.library = payload.library;
+                setInstallLink();
+                if (message) toast(`${message} · Shelves updated on Board`);
+                return;
+            } catch { /* offline / expired */ }
+        }
+        if (message) toast(message);
+    }
+
     (async () => {
         try {
             await reload();
+            setInstallLink();
             if (hasTmdb()) {
                 state.filters.country = state.library.settings.country || 'US';
                 await loadReference();
