@@ -34,6 +34,11 @@
           <a class="btn primary lg" id="open-saved" href="#">Open my library →</a>
           <a class="btn ghost lg" href="/configure?new=1" id="create-another">Create a new library</a>
         </div>
+        <p class="saved-link" id="saved-link" hidden>
+          <span class="muted small">Your library link</span>
+          <code class="mono small" id="saved-url"></code>
+          <button type="button" class="btn ghost sm" id="copy-saved">Copy</button>
+        </p>
         <form class="existing" id="existing-form" hidden>
           <input class="input grow" id="existing-input" autocomplete="off" spellcheck="false"
             placeholder="Paste your library link, manifest URL or token">
@@ -124,6 +129,14 @@
         document.getElementById('cta-new').hidden = true;
         document.getElementById('cta-saved').hidden = false;
         document.getElementById('open-saved').href = href;
+        var full = location.origin + href;
+        document.getElementById('saved-link').hidden = false;
+        document.getElementById('saved-url').textContent = full;
+        document.getElementById('copy-saved').onclick = function (event) {
+          var done = function () { event.target.textContent = 'Copied ✓'; };
+          if (navigator.clipboard) navigator.clipboard.writeText(full).then(done, function () { prompt('Your library link', full); });
+          else prompt('Your library link', full);
+        };
         document.querySelectorAll('a[href="/configure?new=1"]:not(#create-another)').forEach(function (link) {
           link.href = href;
           link.textContent = link.hasAttribute('data-saved-href') ? 'My library' : 'Open my library →';
