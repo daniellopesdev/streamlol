@@ -47,14 +47,14 @@ function cycleGenre(filters, id) {
     return { ...filters, genres: [...filters.genres, id] };
 }
 
-const DiscoverFilters = ({ filters, reference, onChange, onCountry, onApply, onReset, onClose, onSettings }) => {
+const DiscoverFilters = ({ filters, reference, hasTmdb, onChange, onCountry, onApply, onReset, onClose, onSettings, onRefresh }) => {
     const [allPlatforms, setAllPlatforms] = React.useState(false);
     const selectedPlatforms = new Set(filters.platforms);
     const providers = allPlatforms
         ? reference.providers
-        : reference.providers.filter((item, index) => index < PLATFORM_PREVIEW || selectedPlatforms.has(String(item.id)));
+        : (reference.providers || []).filter((item, index) => index < PLATFORM_PREVIEW || selectedPlatforms.has(String(item.id)));
     const set = (patch) => onChange({ ...filters, ...patch });
-    const tmdb = reference.source === 'tmdb';
+    const tmdbReady = reference.source === 'tmdb' && (reference.providers || []).length > 0;
 
     return (
         <ModalDialog
@@ -101,7 +101,7 @@ const DiscoverFilters = ({ filters, reference, onChange, onCountry, onApply, onR
                     <Stepper label={'To'} value={filters.yearTo} start={THIS_YEAR} step={1} min={1900} max={THIS_YEAR} onChange={(yearTo) => set({ yearTo })} />
                 </div>
 
-                {tmdb ? (
+                {tmdbReady ? (
                     <>
                         <Section title={'Streaming on'}>
                             {providers.map((provider) => {
@@ -115,7 +115,7 @@ const DiscoverFilters = ({ filters, reference, onChange, onCountry, onApply, onR
                             ) : null}
                         </Section>
                         <Section title={'Country'} hint={'Used for platform availability'}>
-                            {reference.countries.map((country) => (
+                            {(reference.countries || []).map((country) => (
                                 <Pill key={country.code} label={country.name} selected={filters.country === country.code} onClick={() => onCountry(country.code)} />
                             ))}
                         </Section>
@@ -126,6 +126,10 @@ const DiscoverFilters = ({ filters, reference, onChange, onCountry, onApply, onR
                             ))}
                         </Section>
                     </>
+                ) : hasTmdb ? (
+                    <Section title={'Streaming on'} hint={'Token is already saved — load platforms'}>
+                        <Pill icon={'filters'} label={'Load platforms'} onClick={onRefresh} />
+                    </Section>
                 ) : (
                     <Section title={'Streaming on'} hint={'Platform, country and vote filters need a free TMDB token'}>
                         <Pill icon={'settings'} label={'Add TMDB token'} onClick={onSettings} />
@@ -145,12 +149,14 @@ const DiscoverFilters = ({ filters, reference, onChange, onCountry, onApply, onR
 DiscoverFilters.propTypes = {
     filters: PropTypes.object.isRequired,
     reference: PropTypes.object.isRequired,
+    hasTmdb: PropTypes.bool,
     onChange: PropTypes.func,
     onCountry: PropTypes.func,
     onApply: PropTypes.func,
     onReset: PropTypes.func,
     onClose: PropTypes.func,
     onSettings: PropTypes.func,
+    onRefresh: PropTypes.func,
 };
 
 module.exports = { DiscoverFilters, DISCOVER_SORTS, SHELF_SORTS };

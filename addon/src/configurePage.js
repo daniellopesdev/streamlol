@@ -55,15 +55,28 @@ function configurePage({ manifestUrl, installUrl, token, tmdb }) {
     </div>
 
     <h2>2. TMDB token <span id="status" class="status${tmdb ? ' ok' : ''}">${status}</span></h2>
+    ${tmdb ? `
+    <p>Token is already saved for this library. Platforms and suggestions use it automatically.</p>
+    <details>
+      <summary>Change or replace the token</summary>
+      <form id="tmdb">
+        <input id="tmdb-token" type="password" autocomplete="off" placeholder="Paste a new API Read Access Token">
+        <div class="row">
+          <button class="button" type="submit">Save token</button>
+          <button class="button secondary" type="button" id="tmdb-clear">Remove token</button>
+        </div>
+      </form>
+    </details>
+    ` : `
     <p>Discover filters (genre, year, IMDb rating, streaming platform) use TMDB. Getting a token is free and takes about two minutes:</p>
     <ol>${TMDB_STEPS.map((step) => `<li>${step}</li>`).join('')}</ol>
     <form id="tmdb">
       <input id="tmdb-token" type="password" autocomplete="off" placeholder="Paste API Read Access Token">
       <div class="row">
         <button class="button" type="submit">Save token</button>
-        <button class="button secondary" type="button" id="tmdb-clear">Remove token</button>
       </div>
     </form>
+    `}
     <p id="message"></p>
 
     <h2>Library token</h2>
@@ -94,7 +107,8 @@ function configurePage({ manifestUrl, installUrl, token, tmdb }) {
         message.textContent = payload.err || 'Could not save token.';
       }
     });
-    document.getElementById('tmdb-clear').addEventListener('click', async () => {
+    const clear = document.getElementById('tmdb-clear');
+    if (clear) clear.addEventListener('click', async () => {
       const response = await fetch(api, { method: 'DELETE' });
       const payload = await response.json().catch(() => ({}));
       show('Token removed.', payload.tmdb === 'server');

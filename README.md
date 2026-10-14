@@ -43,12 +43,16 @@ npx pnpm@11.8.0 start  # http://localhost:8080
 
 Open the **Shelves** tab in the nav. Connect with the manifest URL from the configure page if it does not auto-detect.
 
-### 3. Desktop (optional)
+### 3. Desktop app (Windows `.exe`)
 
 ```bash
 cd web && npx pnpm@11.8.0 run build
-cd ../desktop && npm install && npm start
+cd ../desktop && npm install && npm run pack
 ```
+
+Run `desktop/dist/win-unpacked/Streamlol.exe` (amber shelf icon), or double‑click **Streamlol.lnk** / **Streamlol.bat** (starts the addon + app). A shortcut is also on your Desktop.
+
+Dev without packaging: `cd desktop && npm start` (needs `web/build` already built).
 
 ## Self-hosting the addon
 

@@ -549,6 +549,7 @@ const Shelves = () => {
     };
 
     const renderDiscoverBar = () => {
+        const hasTmdb = Boolean(library && library.settings.tmdb);
         const tmdb = reference.source === 'tmdb';
         const summary = discoverSummary(filters, reference);
         return (
@@ -624,8 +625,13 @@ const Shelves = () => {
                             })}
                         </ChipRow>
                         <ChipRow label={'More'}>
-                            <Pill icon={'filters'} label={'Years, platforms, exclude genres…'} onClick={() => openPanel({ type: 'discover-filters' })} />
-                            {!tmdb ? <span className={styles['summary-hint']}>Add a TMDB token in Settings for platform filters.</span> : null}
+                            <Pill icon={'filters'} label={'Years, platforms, exclude genres…'} onClick={() => {
+                                if (library.settings.tmdb && reference.source !== 'tmdb') {
+                                    loadReference(filters.country || library.settings.country, filters.type);
+                                }
+                                openPanel({ type: 'discover-filters' });
+                            }} />
+                            {!hasTmdb ? <span className={styles['summary-hint']}>Add a TMDB token in Settings for platform filters.</span> : null}
                         </ChipRow>
                     </div>
                 ) : <div className={styles['summary']}>{summary.join('  ·  ')}</div>}
@@ -705,6 +711,7 @@ const Shelves = () => {
                 <DiscoverFilters
                     filters={filters}
                     reference={reference}
+                    hasTmdb={Boolean(library.settings.tmdb)}
                     onChange={setFilters}
                     onCountry={(country) => {
                         setFilters({ ...filters, country, platforms: [] });
@@ -717,6 +724,7 @@ const Shelves = () => {
                     }}
                     onReset={() => setFilters({ ...freshFilters(filters.type), country: filters.country })}
                     onSettings={() => setPanel({ type: 'settings' })}
+                    onRefresh={() => loadReference(filters.country || library.settings.country, filters.type)}
                     onClose={closePanel}
                 />
             );

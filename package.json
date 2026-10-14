@@ -13,6 +13,7 @@
     "web": "npx --yes pnpm@11.8.0 --dir web start",
     "web:build": "npx --yes pnpm@11.8.0 --dir web run build",
     "desktop": "npm --prefix desktop start",
+    "desktop:pack": "npm --prefix desktop run pack",
     "test": "npm --prefix addon test"
   }
 }

@@ -3,7 +3,13 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
-const buildDir = path.resolve(__dirname, '..', 'web', 'build');
+const buildDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'web-build')
+    : path.resolve(__dirname, '..', 'web', 'build');
+
+const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.ico')
+    : path.join(__dirname, 'build', 'icon.ico');
 
 const MIME = {
     '.html': 'text/html; charset=utf-8',
@@ -61,6 +67,7 @@ async function openWindow() {
         height: 800,
         backgroundColor: '#0b0d12',
         autoHideMenuBar: true,
+        icon: fs.existsSync(iconPath) ? iconPath : undefined,
         webPreferences: { contextIsolation: true, nodeIntegration: false },
     });
     const override = process.env.STREAMLOL_WEB_URL;

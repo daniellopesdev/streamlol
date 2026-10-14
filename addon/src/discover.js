@@ -183,10 +183,26 @@ function tmdbGenreIds(names, tmdbGenres) {
         .filter(Boolean);
 }
 
+function byImdbDesc(a, b) {
+    return (Number(b.imdbRating) || 0) - (Number(a.imdbRating) || 0);
+}
+
+function ratingCanUseTopRated(filters, wantedPlatforms) {
+    return filters.sort === 'rating'
+        && !filters.q
+        && !filters.genres.length
+        && !filters.excludeGenres.length
+        && !filters.yearFrom
+        && !filters.yearTo
+        && !wantedPlatforms.length
+        && !filters.minVotes;
+}
+
 function tmdbParams(filters, page) {
     const series = filters.type === 'series';
     const dateKey = series ? 'first_air_date' : 'primary_release_date';
     const today = new Date().toISOString().slice(0, 10);
+    const rating = filters.sort === 'rating';
     const sort = {
         popular: 'popularity.desc',
         rating: 'vote_average.desc',
@@ -195,6 +211,8 @@ function tmdbParams(filters, page) {
     }[filters.sort] || 'popularity.desc';
     const minVotes = Number(filters.minVotes) || 0;
     const platforms = asList(filters.platforms).join('|');
+    // Rating sort needs a high vote floor so obscure 10.0 TMDB scores don't float above classics.
+    const voteFloor = rating ? Math.max(minVotes, series ? 200 : 1000) : minVotes;
     const params = {
         include_adult: false,
         page,
@@ -204,11 +222,14 @@ function tmdbParams(filters, page) {
         with_watch_providers: platforms || undefined,
         with_watch_monetization_types: platforms ? 'flatrate|free|ads|rent|buy' : undefined,
         watch_region: platforms ? filters.country : undefined,
-        'vote_count.gte': filters.sort === 'rating' ? Math.max(minVotes, series ? 150 : 300) : (minVotes || undefined),
+        'vote_count.gte': voteFloor || undefined,
         [`${dateKey}.gte`]: filters.yearFrom ? `${filters.yearFrom}-01-01` : undefined,
-        [`${dateKey}.lte`]: filters.yearTo ? `${filters.yearTo}-12-31` : (filters.sort === 'newest' ? today : undefined),
+        [`${dateKey}.lte`]: filters.yearTo
+            ? `${filters.yearTo}-12-31`
+            : (filters.sort === 'newest' || rating ? today : undefined),
     };
-    if (filters.minImdb) params['vote_average.gte'] = Math.max(0, Number(filters.minImdb) - 1.5);
+    if (filters.minImdb) params['vote_average.gte'] = Math.max(0, Number(filters.minImdb) - 0.5);
+    else if (rating) params['vote_average.gte'] = 7;
     if (series) {
         if (!params['vote_count.gte']) params['vote_count.gte'] = 100;
         if (!filters.genres.length) {
@@ -236,13 +257,25 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
     let page = Number(cursor) || 1;
     let totalPages = page;
     let pagesUsed = 0;
+    const useTopRated = ratingCanUseTopRated(filters, wantedPlatforms);
+    const today = new Date().toISOString().slice(0, 10);
 
     while (results.length < PAGE_TARGET && pagesUsed < MAX_SOURCE_PAGES && page <= totalPages) {
         const payload = filters.q
             ? await tmdb(credential, `/search/${kind}`, { query: filters.q, page, include_adult: false })
-            : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
+            : useTopRated
+                ? await tmdb(credential, `/${kind}/top_rated`, { page, language: 'en-US' })
+                : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
         totalPages = Math.min(payload.total_pages || page, 500);
-        const candidates = (payload.results || []).filter((item) => matchesLocal(item, idFilters));
+        const candidates = (payload.results || []).filter((item) => {
+            if (!matchesLocal(item, idFilters)) return false;
+            // Top rated / rating lists still include unreleased titles; drop anything after today.
+            if (filters.sort === 'rating') {
+                const date = item.release_date || item.first_air_date || '';
+                if (date && date > today) return false;
+            }
+            return true;
+        });
         const enriched = await mapPool(candidates, 5, async (item) => {
             const facts = await tmdbFacts(credential, type, item.id).catch(() => null);
             if (!facts || !facts.imdbId) return null;
@@ -251,6 +284,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
             if (filters.q && wantedPlatforms.length && !wantedPlatforms.some((id) => available.has(id))) return null;
             const rating = await imdbRating(facts.imdbId, type);
             if (filters.minImdb && !(Number(rating) >= Number(filters.minImdb))) return null;
+            if (filters.sort === 'rating' && !(Number(rating) > 0)) return null;
             return {
                 imdbId: facts.imdbId,
                 type,
@@ -269,6 +303,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
         page += 1;
     }
 
+    if (filters.sort === 'rating') results.sort(byImdbDesc);
     return { source: 'tmdb', results, nextCursor: page <= totalPages ? String(page) : null };
 }
 
@@ -280,7 +315,9 @@ function cinemetaStart(filters) {
         .find((name) => known.includes(name)) || '';
     const base = { type: filters.type, skip: 0 };
     if (filters.q) return { ...base, catalog: 'top', search: filters.q };
-    if (filters.sort === 'rating') return { ...base, catalog: 'imdbRating', genre };
+    // Cinemeta's "imdbRating" catalog is now "Featured" (new titles), not an IMDb chart.
+    // Without TMDB we scrape Popular and re-rank locally by IMDb score.
+    if (filters.sort === 'rating') return { ...base, catalog: 'top', genre, rank: 'imdb' };
     if (filters.sort === 'newest' || (filters.yearFrom && filters.yearFrom === filters.yearTo)) {
         return { ...base, catalog: 'year', genre: String(Math.min(Number(filters.yearTo) || thisYear, thisYear)) };
     }
@@ -315,8 +352,12 @@ async function cinemetaDiscover(library, filters, cursor, hideViewed) {
     const results = [];
     const seen = new Set();
     let pagesUsed = 0;
+    const rankByImdb = filters.sort === 'rating' || state.rank === 'imdb';
+    // Rating without TMDB needs a wider scrape so local IMDb re-rank has enough candidates.
+    const pageBudget = rankByImdb ? MAX_SOURCE_PAGES * 4 : MAX_SOURCE_PAGES * 2;
+    const target = rankByImdb ? PAGE_TARGET * 3 : PAGE_TARGET;
 
-    while (state && results.length < PAGE_TARGET && pagesUsed < MAX_SOURCE_PAGES * 2) {
+    while (state && results.length < target && pagesUsed < pageBudget) {
         const metas = await cinemetaCatalog(filters.type, state.catalog, {
             genre: state.genre,
             search: state.search,
@@ -330,20 +371,26 @@ async function cinemetaDiscover(library, filters, cursor, hideViewed) {
             })
             .filter((film) => !(hideViewed && library.status[film.imdbId] === 'viewed'))
             .filter((film) => matchesFilm(film, { ...filters, minImdb: '' }));
-        if (filters.minImdb) {
+        if (filters.minImdb || rankByImdb) {
             await mapPool(films.filter((film) => !film.imdbRating), 5, async (film) => {
                 film.imdbRating = await imdbRating(film.imdbId, filters.type);
             });
         }
         results.push(...films.filter((film) => matchesFilm(film, filters)));
         state = cinemetaNext(state, metas.length, filters);
+        if (state && rankByImdb) state = { ...state, rank: 'imdb' };
         pagesUsed += 1;
     }
 
-    const notice = asList(filters.platforms).length
-        ? 'Streaming platform filters need a TMDB token (Settings).'
-        : null;
-    return { source: 'cinemeta', results, nextCursor: encodeCursor(state), notice };
+    if (rankByImdb) {
+        results.sort(byImdbDesc);
+        results.splice(PAGE_TARGET);
+    }
+
+    const notices = [];
+    if (asList(filters.platforms).length) notices.push('Streaming platform filters need a TMDB token (Settings).');
+    if (rankByImdb) notices.push('Top rated is approximate without TMDB — add a token in Settings for the real chart.');
+    return { source: 'cinemeta', results, nextCursor: encodeCursor(state), notice: notices.join(' ') || null };
 }
 
 async function discover(library, filters, cursor) {

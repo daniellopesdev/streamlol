@@ -179,7 +179,13 @@ const FilmPanel = ({ film, canGoBack, library, run, call, onOpen, onPick, onBack
                     <div className={styles['section']}>
                         <div className={styles['section-title']}>
                             Cast &amp; crew
-                            <span className={styles['section-hint']}>{peopleLinked ? 'Pick a person to see their other titles' : 'Add a TMDB token for cast and director suggestions'}</span>
+                            <span className={styles['section-hint']}>
+                                {peopleLinked
+                                    ? 'Pick a person to see their other titles'
+                                    : library.settings.tmdb
+                                        ? 'Cast links unavailable for this title'
+                                        : 'Add a TMDB token in Settings for cast and director suggestions'}
+                            </span>
                         </div>
                         <div className={styles['people-row']}>
                             {people.map((person) => (
