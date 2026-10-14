@@ -1,6 +1,7 @@
 const { tmdb, credentialFor } = require('./tmdb');
 const { imdbRating, cinemetaCatalog, filmFromMeta } = require('./cinemeta');
 const { collapseProviders, expandPlatformIds, brandNamesForIds } = require('./platforms');
+const { scopeLabel, scopeParams, scopePool, isPooled, movieOnly } = require('./scopes');
 
 const CINEMETA_MAX_SKIP = 2000;
 const BASE_GENRES = [
@@ -12,7 +13,7 @@ const CINEMETA_GENRES = {
     series: [...BASE_GENRES, 'Reality-TV', 'Talk-Show', 'Game-Show'],
 };
 const GENRE_ALIASES = { 'Sci-Fi': 'Science Fiction', 'Science Fiction': 'Sci-Fi' };
-const SORTS = ['popular', 'rating', 'newest', 'votes'];
+const SORTS = ['popular', 'rating', 'newest', 'votes', 'list'];
 const TYPES = ['movie', 'series'];
 const TV_NOISE_GENRES = ['10763', '10766', '10767'];
 
@@ -190,6 +191,7 @@ function byImdbDesc(a, b) {
 function ratingCanUseTopRated(filters, wantedPlatforms) {
     return filters.sort === 'rating'
         && !filters.q
+        && !filters.scope
         && !filters.genres.length
         && !filters.excludeGenres.length
         && !filters.yearFrom
@@ -212,8 +214,11 @@ function tmdbParams(filters, page) {
     const minVotes = Number(filters.minVotes) || 0;
     const platforms = asList(filters.platforms).join('|');
     // Rating sort needs a high vote floor so obscure 10.0 TMDB scores don't float above classics.
-    const voteFloor = rating ? Math.max(minVotes, series ? 200 : 1000) : minVotes;
+    // Scoped searches (company/keyword) are niche, so the floor is much lower there.
+    const ratingFloor = filters.scope ? 50 : (series ? 200 : 1000);
+    const voteFloor = rating ? Math.max(minVotes, ratingFloor) : minVotes;
     const params = {
+        ...scopeParams(filters.scope),
         include_adult: false,
         page,
         sort_by: sort,
@@ -229,9 +234,9 @@ function tmdbParams(filters, page) {
             : (filters.sort === 'newest' || rating ? today : undefined),
     };
     if (filters.minImdb) params['vote_average.gte'] = Math.max(0, Number(filters.minImdb) - 0.5);
-    else if (rating) params['vote_average.gte'] = 7;
+    else if (rating && !filters.scope) params['vote_average.gte'] = 7;
     if (series) {
-        if (!params['vote_count.gte']) params['vote_count.gte'] = 100;
+        if (!params['vote_count.gte'] && !filters.scope) params['vote_count.gte'] = 100;
         if (!filters.genres.length) {
             params.without_genres = [...filters.excludeGenres, ...TV_NOISE_GENRES]
                 .filter((id, index, all) => all.indexOf(id) === index)
@@ -241,9 +246,99 @@ function tmdbParams(filters, page) {
     return params;
 }
 
+function dateOf(item) {
+    return item.release_date || item.first_air_date || '';
+}
+
+function titleMatches(item, q) {
+    if (!q) return true;
+    const needle = q.toLowerCase();
+    return [item.title, item.name, item.original_title, item.original_name]
+        .some((value) => typeof value === 'string' && value.toLowerCase().includes(needle));
+}
+
+// Bayesian average so a 9.0 with 12 votes doesn't outrank a 8.5 with 20k.
+function weightedScore(item) {
+    const votes = item.vote_count || 0;
+    const prior = 60;
+    return (votes / (votes + prior)) * (item.vote_average || 0) + (prior / (votes + prior)) * 6.5;
+}
+
+function sortPool(items, sort) {
+    const sorted = items.slice();
+    if (sort === 'rating') sorted.sort((a, b) => weightedScore(b) - weightedScore(a));
+    else if (sort === 'newest') sorted.sort((a, b) => dateOf(b).localeCompare(dateOf(a)));
+    else if (sort === 'votes') sorted.sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
+    else if (sort === 'list') sorted.sort((a, b) => (a.listOrder || 0) - (b.listOrder || 0));
+    else sorted.sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
+    return sorted;
+}
+
+function enricher(credential, library, filters, ctx) {
+    const { type, country } = filters;
+    return async (item) => {
+        const facts = await tmdbFacts(credential, type, item.id).catch(() => null);
+        if (!facts || !facts.imdbId) return null;
+        if (ctx.hideViewed && library.status[facts.imdbId] === 'viewed') return null;
+        const available = providerIds(facts.providers, country);
+        if (ctx.checkPlatforms && ctx.wantedPlatforms.length && !ctx.wantedPlatforms.some((id) => available.has(id))) return null;
+        const rating = await imdbRating(facts.imdbId, type);
+        if (filters.minImdb && !(Number(rating) >= Number(filters.minImdb))) return null;
+        if (filters.sort === 'rating' && !filters.scope && !(Number(rating) > 0)) return null;
+        return {
+            imdbId: facts.imdbId,
+            type,
+            tmdbId: item.id,
+            title: item.title || item.name,
+            year: yearOf(dateOf(item)),
+            poster: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
+            genres: (item.genre_ids || []).map((id) => ctx.genreNames.get(String(id))).filter(Boolean),
+            imdbRating: rating,
+            platforms: brandNamesForIds([...available], ctx.ref.providers),
+            description: item.overview || '',
+        };
+    };
+}
+
+async function pooledDiscover(credential, library, filters, idFilters, ctx, cursor) {
+    const today = new Date().toISOString().slice(0, 10);
+    const pool = await scopePool(credential, filters.scope, filters.type);
+    const minVotes = Number(filters.minVotes) || 0;
+    const releasedOnly = filters.sort === 'rating' || filters.sort === 'votes';
+    const candidates = sortPool(pool.filter((item) => {
+        if (!item.poster_path) return false;
+        if (!matchesLocal(item, idFilters)) return false;
+        if (!titleMatches(item, filters.q)) return false;
+        if (minVotes && (item.vote_count || 0) < minVotes) return false;
+        const date = dateOf(item);
+        if (releasedOnly && (!date || date > today)) return false;
+        return true;
+    }), filters.sort);
+
+    const enrich = enricher(credential, library, filters, { ...ctx, checkPlatforms: true });
+    const results = [];
+    let offset = Number(cursor) || 0;
+    const budget = offset + PAGE_TARGET * 6;
+    while (results.length < PAGE_TARGET && offset < candidates.length && offset < budget) {
+        const slice = candidates.slice(offset, offset + 10);
+        offset += slice.length;
+        const enriched = await mapPool(slice, 5, enrich);
+        results.push(...enriched.filter(Boolean));
+    }
+    return {
+        source: 'tmdb',
+        scope: { ...filters.scope, label: scopeLabel(filters.scope, filters.type), total: candidates.length },
+        results,
+        nextCursor: offset < candidates.length ? String(offset) : null,
+    };
+}
+
 async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
-    const { country, type } = filters;
+    const { country, type, scope } = filters;
     const kind = tmdbKind(type);
+    if (scope && movieOnly(scope) && type === 'series') {
+        return { source: 'tmdb', results: [], nextCursor: null, notice: `${scope.name} only has movies. Switch to Movies.` };
+    }
     const ref = await tmdbReference(credential, country, type);
     const genreNames = new Map(ref.tmdbGenres.map((genre) => [String(genre.id), genre.name]));
     const wantedPlatforms = expandPlatformIds(filters.platforms, ref.providers);
@@ -253,15 +348,20 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
         excludeGenres: tmdbGenreIds(filters.excludeGenres, ref.tmdbGenres),
         platforms: wantedPlatforms,
     };
+    const ctx = { ref, genreNames, wantedPlatforms, hideViewed };
+    if (isPooled(scope)) return pooledDiscover(credential, library, filters, idFilters, ctx, cursor);
+
     const results = [];
     let page = Number(cursor) || 1;
     let totalPages = page;
     let pagesUsed = 0;
     const useTopRated = ratingCanUseTopRated(filters, wantedPlatforms);
+    const titleSearch = filters.q && !scope;
     const today = new Date().toISOString().slice(0, 10);
+    const enrich = enricher(credential, library, filters, { ...ctx, checkPlatforms: titleSearch });
 
     while (results.length < PAGE_TARGET && pagesUsed < MAX_SOURCE_PAGES && page <= totalPages) {
-        const payload = filters.q
+        const payload = titleSearch
             ? await tmdb(credential, `/search/${kind}`, { query: filters.q, page, include_adult: false })
             : useTopRated
                 ? await tmdb(credential, `/${kind}/top_rated`, { page, language: 'en-US' })
@@ -269,42 +369,27 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
         totalPages = Math.min(payload.total_pages || page, 500);
         const candidates = (payload.results || []).filter((item) => {
             if (!matchesLocal(item, idFilters)) return false;
+            if (scope && !titleMatches(item, filters.q)) return false;
             // Top rated / rating lists still include unreleased titles; drop anything after today.
             if (filters.sort === 'rating') {
-                const date = item.release_date || item.first_air_date || '';
+                const date = dateOf(item);
                 if (date && date > today) return false;
             }
             return true;
         });
-        const enriched = await mapPool(candidates, 5, async (item) => {
-            const facts = await tmdbFacts(credential, type, item.id).catch(() => null);
-            if (!facts || !facts.imdbId) return null;
-            if (hideViewed && library.status[facts.imdbId] === 'viewed') return null;
-            const available = providerIds(facts.providers, country);
-            if (filters.q && wantedPlatforms.length && !wantedPlatforms.some((id) => available.has(id))) return null;
-            const rating = await imdbRating(facts.imdbId, type);
-            if (filters.minImdb && !(Number(rating) >= Number(filters.minImdb))) return null;
-            if (filters.sort === 'rating' && !(Number(rating) > 0)) return null;
-            return {
-                imdbId: facts.imdbId,
-                type,
-                tmdbId: item.id,
-                title: item.title || item.name,
-                year: yearOf(item.release_date || item.first_air_date),
-                poster: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
-                genres: (item.genre_ids || []).map((id) => genreNames.get(String(id))).filter(Boolean),
-                imdbRating: rating,
-                platforms: brandNamesForIds([...available], ref.providers),
-                description: item.overview || '',
-            };
-        });
+        const enriched = await mapPool(candidates, 5, enrich);
         results.push(...enriched.filter(Boolean));
         pagesUsed += 1;
         page += 1;
     }
 
     if (filters.sort === 'rating') results.sort(byImdbDesc);
-    return { source: 'tmdb', results, nextCursor: page <= totalPages ? String(page) : null };
+    return {
+        source: 'tmdb',
+        scope: scope ? { ...scope, label: scopeLabel(scope, type) } : null,
+        results,
+        nextCursor: page <= totalPages ? String(page) : null,
+    };
 }
 
 function cinemetaStart(filters) {
@@ -405,8 +490,15 @@ async function discover(library, filters, cursor) {
         genres: asList(filters.genres),
         excludeGenres: asList(filters.excludeGenres),
         platforms: asList(filters.platforms),
+        scope: filters.scope || null,
     };
     if (credential) return tmdbDiscover(credential, library, normalized, cursor, hideViewed);
+    if (normalized.scope) {
+        const error = new Error('People, collections and company search need a TMDB token.');
+        error.status = 412;
+        error.code = 'tmdb_missing';
+        throw error;
+    }
     return cinemetaDiscover(library, normalized, cursor, hideViewed);
 }
 

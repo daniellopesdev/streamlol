@@ -1,6 +1,7 @@
 const { createId } = require('./store');
 const { asList, SORTS, typeOf } = require('./discover');
 const { brandName } = require('./platforms');
+const { cleanScope } = require('./scopes');
 
 const IMDB_RE = /^tt\d{4,}$/;
 
@@ -45,6 +46,7 @@ function cleanFilters(input = {}) {
         platforms: asList(input.platforms).slice(0, 12),
         country: /^[A-Z]{2}$/.test(input.country || '') ? input.country : '',
         hideViewed: input.hideViewed !== false && input.hideViewed !== 'false',
+        scope: cleanScope(input.scope),
     };
 }
 

@@ -1,6 +1,7 @@
 const { tmdb, credentialFor } = require('./tmdb');
 const { cinemetaMeta, cinemetaCatalog, filmFromMeta } = require('./cinemeta');
 const { mapPool, typeOf, tmdbKind, yearOf } = require('./discover');
+const { personCredits } = require('./scopes');
 
 const ROW_SIZE = 15;
 const CACHE_MS = 6 * 60 * 60 * 1000;
@@ -69,12 +70,8 @@ async function tmdbFilms(credential, type, items, excludeId) {
 }
 
 async function personRow(credential, type, person, role) {
-    const credits = await tmdb(credential, `/person/${person.id}/${type === 'series' ? 'tv_credits' : 'movie_credits'}`);
-    const pool = role === 'crew'
-        ? (credits.crew || []).filter((item) => (type === 'series' ? ['Creator', 'Executive Producer'] : ['Director']).includes(item.job))
-        : (credits.cast || []).filter((item) => type !== 'series' || (item.episode_count || 0) >= 8);
-    const sorted = pool.slice().sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
-    return sorted;
+    const pool = await personCredits(credential, type, person.id, role);
+    return pool.slice().sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
 }
 
 async function cinemetaGenreRow(type, genres, imdbId) {

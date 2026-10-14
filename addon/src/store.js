@@ -6,6 +6,8 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const TOKEN_RE = /^[a-f0-9]{24}$/;
 const queues = new Map();
 
+let redisClient = null;
+
 function emptyLibrary() {
     return {
         films: {},
@@ -30,10 +32,7 @@ function fileFor(token) {
     return path.join(DATA_DIR, `${token}.json`);
 }
 
-function load(token) {
-    const file = fileFor(token);
-    if (!fs.existsSync(file)) return emptyLibrary();
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+function normalize(parsed) {
     return {
         ...emptyLibrary(),
         ...parsed,
@@ -46,7 +45,70 @@ function load(token) {
     };
 }
 
-function save(token, library) {
+function redisCredentials() {
+    const url = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL || '';
+    const token = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN || '';
+    if (!url || !token) return null;
+    return { url, token };
+}
+
+function redisEnabled() {
+    return Boolean(redisCredentials());
+}
+
+function onVercel() {
+    return Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+}
+
+function assertWritableStorage() {
+    if (redisEnabled()) return;
+    if (!onVercel()) return;
+    const error = new Error(
+        'Vercel has no writable disk. Add Upstash Redis to this project '
+        + '(UPSTASH_REDIS_REST_URL + UPSTASH_REDIS_REST_TOKEN), then redeploy. '
+        + 'See addon/DEPLOY.md'
+    );
+    error.status = 503;
+    error.code = 'storage_missing';
+    throw error;
+}
+
+function redis() {
+    const credentials = redisCredentials();
+    if (!credentials) return null;
+    if (!redisClient) {
+        const { Redis } = require('@upstash/redis');
+        redisClient = new Redis(credentials);
+    }
+    return redisClient;
+}
+
+function redisKey(token) {
+    return `streamlol:library:${token}`;
+}
+
+async function load(token) {
+    assertToken(token);
+    const client = redis();
+    if (client) {
+        const parsed = await client.get(redisKey(token));
+        if (!parsed) return emptyLibrary();
+        return normalize(typeof parsed === 'string' ? JSON.parse(parsed) : parsed);
+    }
+    assertWritableStorage();
+    const file = fileFor(token);
+    if (!fs.existsSync(file)) return emptyLibrary();
+    return normalize(JSON.parse(fs.readFileSync(file, 'utf8')));
+}
+
+async function save(token, library) {
+    assertToken(token);
+    const client = redis();
+    if (client) {
+        await client.set(redisKey(token), library);
+        return;
+    }
+    assertWritableStorage();
     fs.mkdirSync(DATA_DIR, { recursive: true });
     const file = fileFor(token);
     const tmp = `${file}.${process.pid}.tmp`;
@@ -56,10 +118,10 @@ function save(token, library) {
 
 function update(token, mutator) {
     const prev = queues.get(token) || Promise.resolve();
-    const next = prev.then(() => {
-        const library = load(token);
-        const result = mutator(library);
-        save(token, library);
+    const next = prev.then(async () => {
+        const library = await load(token);
+        const result = await mutator(library);
+        await save(token, library);
         return result === undefined ? library : result;
     });
     queues.set(token, next.then(() => {}, () => {}));
@@ -74,6 +136,10 @@ function createId() {
     return crypto.randomBytes(4).toString('hex');
 }
 
+function storageMode() {
+    return redisEnabled() ? 'redis' : (onVercel() ? 'missing' : 'file');
+}
+
 module.exports = {
     DATA_DIR,
     TOKEN_RE,
@@ -84,4 +150,6 @@ module.exports = {
     update,
     createToken,
     createId,
+    storageMode,
+    redisEnabled,
 };

@@ -78,6 +78,33 @@ Persist `/app/data` — each user’s library is a JSON file keyed by token.
 
 Platform chips collapse TMDB duplicates (e.g. *Amazon Prime Video with Ads*) into one brand; filtering still matches every sibling provider id.
 
+## Board (stock Stremio / TV)
+
+**Manage on the website, watch from Stremio.**
+
+1. Open `https://YOUR-APP/configure` once → bookmark `https://YOUR-APP/<token>/`.
+2. Set your **TMDB** token (required), then curate Discover / lists / viewed there.
+3. Install `…/<token>/manifest.json` in Stremio.
+4. Board / Discover shows **Shelves · …** rows.
+
+The optional Streamlol desktop fork is no longer required for day-to-day use.
+
+**Same PC:** `http://127.0.0.1:7000/<token>/`  
+**TV:** use the HTTPS Vercel URL (see `addon/DEPLOY.md`). Ads can be enabled later via `ADS_*` env vars.
+
+### Deploy on Vercel (recommended for TV)
+
+See [`addon/DEPLOY.md`](addon/DEPLOY.md). Short version:
+
+```bash
+cd addon
+npx vercel login
+# add Upstash Redis + env UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN
+npx vercel --prod
+```
+
+Then open `https://your-app.vercel.app/configure`, bookmark your token URL, and install that manifest in Stremio.
+
 ## Upstream
 
 `web/` is based on [Stremio/stremio-web](https://github.com/Stremio/stremio-web) **v5.0.0-beta.42** (GPL-2.0). Streamlol changes live mainly under `web/src/routes/Shelves/` plus small nav / router wiring.

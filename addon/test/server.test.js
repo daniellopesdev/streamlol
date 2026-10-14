@@ -50,7 +50,7 @@ test('catalogs are generated from the live library file', async () => {
             body: JSON.stringify({ imdbId: film.imdbId }),
         });
         const manifest = await json(`${base}/${token}/manifest.json`);
-        assert.equal(manifest.catalogs.some((catalog) => catalog.id === `list_${list.id}` && catalog.name === 'Comfort'), true);
+        assert.equal(manifest.catalogs.some((catalog) => catalog.id === `list_${list.id}` && catalog.name === 'Shelves · Comfort'), true);
         const catalog = await json(`${base}/${token}/catalog/movie/list_${list.id}.json`);
         assert.equal(catalog.metas[0].id, film.imdbId);
         assert.equal(catalog.metas[0].type, 'movie');

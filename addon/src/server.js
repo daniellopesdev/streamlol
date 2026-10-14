@@ -1,13 +1,16 @@
 require('dotenv').config();
 
+const path = require('path');
 const express = require('express');
 const { toMeta } = require('./catalog');
 const { discover, reference } = require('./discover');
 const { credentialFor, credentialSource, verifyCredential } = require('./tmdb');
 const { details, suggestions, personFilms } = require('./details');
+const { searchScopes } = require('./scopes');
 const { createInterface } = require('./manifest');
 const { configurePage } = require('./configurePage');
-const { TOKEN_RE, load, update, createToken } = require('./store');
+const { appPage } = require('./appPage');
+const { TOKEN_RE, load, update, createToken, storageMode } = require('./store');
 const actions = require('./library');
 
 function readToken(raw) {
@@ -34,7 +37,8 @@ function publicLibrary(library) {
 
 function publicUrl(req, token, suffix) {
     const host = req.get('host');
-    return `${req.protocol}://${host}/${token}/${suffix}`;
+    const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+    return `${proto}://${host}/${token}/${suffix}`;
 }
 
 function createApp() {
@@ -53,18 +57,51 @@ function createApp() {
         next();
     });
 
+    app.use('/shelves', express.static(path.join(__dirname, '..', 'public', 'shelves'), {
+        fallthrough: true,
+        setHeaders(res) {
+            res.setHeader('Cache-Control', 'public, max-age=300');
+        },
+    }));
+
     app.get('/', (req, res) => {
         res.redirect('/configure');
+    });
+
+    app.get('/health', (req, res) => {
+        const storage = storageMode();
+        res.status(storage === 'missing' ? 503 : 200).json({
+            ok: storage !== 'missing',
+            storage,
+            hint: storage === 'missing'
+                ? 'Add Upstash Redis env vars UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN (or KV_REST_API_*), then redeploy.'
+                : undefined,
+        });
     });
 
     app.get('/configure', (req, res) => {
         const token = createToken();
         update(token, () => {}).then(() => {
-            res.redirect(`/${token}/configure`);
+            res.redirect(`/${token}/`);
         }).catch((error) => {
             res.status(500).send(error.message);
         });
     });
+
+    function sendApp(req, res, token) {
+        const origin = `${(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim()}://${req.get('host')}`;
+        const manifestUrl = publicUrl(req, token, 'manifest.json');
+        const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
+        return update(token, () => {}).then((library) => {
+            res.type('html').send(appPage({
+                token,
+                origin,
+                manifestUrl,
+                installUrl,
+                tmdb: credentialSource(library),
+            }));
+        });
+    }
 
     app.get('/:config/configure', (req, res) => {
         const token = readToken(req.params.config);
@@ -75,10 +112,39 @@ function createApp() {
         const manifestUrl = publicUrl(req, token, 'manifest.json');
         const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
         update(token, () => {}).then((library) => {
-            res.type('html').send(configurePage({ manifestUrl, installUrl, token, tmdb: credentialSource(library) }));
+            res.type('html').send(configurePage({
+                manifestUrl,
+                installUrl,
+                token,
+                tmdb: credentialSource(library),
+                appUrl: publicUrl(req, token, '').replace(/\/$/, '') + '/',
+            }));
         }).catch((error) => {
             res.status(500).send(error.message);
         });
+    });
+
+    app.get('/:config/', asyncRoute(async (req, res) => {
+        const token = readToken(req.params.config);
+        if (!token) {
+            res.redirect('/configure');
+            return;
+        }
+        await sendApp(req, res, token);
+    }));
+
+    app.get('/:config', (req, res, next) => {
+        const token = readToken(req.params.config);
+        if (!token) {
+            next();
+            return;
+        }
+        // Only bare library URLs — leave manifest/catalog/api alone.
+        if (req.path !== `/${req.params.config}` && req.path !== `/${req.params.config}/`) {
+            next();
+            return;
+        }
+        sendApp(req, res, token).catch(next);
     });
 
     app.get('/:config/manifest.json', asyncRoute(async (req, res) => {
@@ -87,33 +153,30 @@ function createApp() {
             res.status(404).json({ err: 'Invalid token' });
             return;
         }
-        const iface = createInterface(load(token), resolveView);
+        const library = await load(token);
+        const iface = createInterface(library, resolveView);
         res.json(iface.manifest);
     }));
 
     app.get('/:config/catalog/:type/:id.json', catalogRoute);
     app.get('/:config/catalog/:type/:id/:extra.json', catalogRoute);
 
-    app.get('/api/:token', (req, res, next) => {
-        try {
-            res.json(publicLibrary(load(req.params.token)));
-        } catch (error) {
-            next(error);
-        }
-    });
+    app.get('/api/:token', asyncRoute(async (req, res) => {
+        res.json(publicLibrary(await load(req.params.token)));
+    }));
 
     app.get('/api/:token/reference', asyncRoute(async (req, res) => {
-        const library = load(req.params.token);
+        const library = await load(req.params.token);
         const country = /^[A-Z]{2}$/.test(req.query.country || '') ? req.query.country : library.settings.country;
         res.json(await reference(credentialFor(library), country, req.query.type));
     }));
 
     app.get('/api/:token/details/:type/:imdbId', asyncRoute(async (req, res) => {
-        res.json(await details(load(req.params.token), req.params.type, req.params.imdbId));
+        res.json(await details(await load(req.params.token), req.params.type, req.params.imdbId));
     }));
 
     app.get('/api/:token/suggestions/:type/:imdbId', asyncRoute(async (req, res) => {
-        res.json(await suggestions(load(req.params.token), req.params.type, req.params.imdbId));
+        res.json(await suggestions(await load(req.params.token), req.params.type, req.params.imdbId));
     }));
 
     app.get('/api/:token/person/:personId', asyncRoute(async (req, res) => {
@@ -121,12 +184,22 @@ function createApp() {
             res.status(400).json({ err: 'Invalid person id' });
             return;
         }
-        const library = load(req.params.token);
+        const library = await load(req.params.token);
         res.json(await personFilms(library, req.query.type, req.params.personId, req.query.role, String(req.query.name || '').slice(0, 120), req.query.exclude));
     }));
 
+    app.get('/api/:token/search', asyncRoute(async (req, res) => {
+        const library = await load(req.params.token);
+        const credential = credentialFor(library);
+        if (!credential) {
+            res.status(412).json({ err: 'Search by people and collections needs a TMDB token.', code: 'tmdb_missing' });
+            return;
+        }
+        res.json(await searchScopes(credential, req.query.q, req.query.type));
+    }));
+
     app.put('/api/:token/tmdb', asyncRoute(async (req, res) => {
-        load(req.params.token);
+        await load(req.params.token);
         const credential = await verifyCredential(req.body?.token);
         const library = await update(req.params.token, (draft) => {
             draft.settings.tmdbToken = credential;
@@ -144,7 +217,7 @@ function createApp() {
     }));
 
     app.get('/api/:token/discover', asyncRoute(async (req, res) => {
-        const library = load(req.params.token);
+        const library = await load(req.params.token);
         const filters = actions.cleanFilters({
             ...req.query,
             hideViewed: req.query.hideViewed === undefined ? library.settings.hideViewed : req.query.hideViewed !== 'false',
@@ -280,8 +353,11 @@ function catalogRoute(req, res, next) {
         res.status(404).json({ err: 'Invalid token' });
         return;
     }
-    const iface = createInterface(load(token), resolveView);
-    Promise.resolve(iface.get('catalog', req.params.type, req.params.id, parseExtra(req.params.extra)))
+    load(token)
+        .then((library) => {
+            const iface = createInterface(library, resolveView);
+            return iface.get('catalog', req.params.type, req.params.id, parseExtra(req.params.extra));
+        })
         .then((payload) => res.json(payload))
         .catch(next);
 }
@@ -295,7 +371,7 @@ if (require.main === module) {
     const server = listen();
     server.on('listening', () => {
         const address = server.address();
-        console.log(`Streamlol addon listening on ${address.port}`);
+        console.log(`Streamlol addon listening on ${address.port} (storage: ${storageMode()})`);
     });
 }
 

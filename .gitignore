@@ -23,6 +23,10 @@ Thumbs.db
 # Nested upstream clone metadata (vendored into this repo)
 web/.git.upstream-stremio/
 
+# Vercel
+.vercel/
+addon/.vercel/
+
 # IDE / tooling
 .idea/
 .vscode/

@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Streamlol Shelves</title>
+  <link rel="stylesheet" href="/shelves/styles.css">
+  <script>/*__STREAMLOL_BOOT__*/</script>
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark"></span>streamlol<span class="brand-tag">shelves</span></div>
+      <nav class="tabs" id="main-tabs" hidden></nav>
+      <div class="topbar-actions">
+        <a class="btn ghost" id="install-link" href="#" target="_blank" rel="noopener">Install in Stremio</a>
+        <button type="button" class="btn ghost icon" id="btn-settings" hidden aria-label="Settings">⚙</button>
+      </div>
+    </header>
+
+    <div class="ad-slot ad-top" data-ad="top" hidden>
+      <div class="ad-label">Ad</div>
+      <div class="ad-frame" id="ad-top"></div>
+    </div>
+
+    <main class="layout" id="layout">
+      <section class="content" id="view"></section>
+      <aside class="rail" id="rail" hidden>
+        <div class="ad-slot ad-rail" data-ad="rail" hidden>
+          <div class="ad-label">Ad</div>
+          <div class="ad-frame" id="ad-rail"></div>
+        </div>
+      </aside>
+    </main>
+
+    <div class="ad-slot ad-footer" data-ad="footer" hidden>
+      <div class="ad-label">Ad</div>
+      <div class="ad-frame" id="ad-footer"></div>
+    </div>
+
+    <footer class="foot">Curate here — Stremio Board / Discover shows your rows as <b>Shelves · …</b></footer>
+  </div>
+
+  <div id="modal-root"></div>
+  <script src="/shelves/app.js" defer></script>
+</body>
+</html>

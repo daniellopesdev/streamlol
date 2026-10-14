@@ -25,18 +25,18 @@ const matrix = {
 test('library and viewed stay separate, and a review marks the film viewed', async () => {
     const token = createToken();
     await update(token, (library) => actions.upsertFilm(library, matrix, 'library'));
-    let stored = load(token);
+    let stored = await load(token);
     assert.deepEqual(shelfMetas(stored, 'library').map((meta) => meta.id), ['tt0133093']);
     assert.deepEqual(shelfMetas(stored, 'viewed'), []);
 
     await update(token, (library) => actions.setReview(library, 'tt0133093', { score: 9, note: 'Still holds' }));
-    stored = load(token);
+    stored = await load(token);
     assert.deepEqual(shelfMetas(stored, 'library'), []);
     assert.equal(shelfMetas(stored, 'viewed')[0].description.includes('Your score: 9/10'), true);
     assert.equal(shelfMetas(stored, 'reviewed')[0].description.includes('Still holds'), true);
 
     await update(token, (library) => actions.clearReview(library, 'tt0133093'));
-    stored = load(token);
+    stored = await load(token);
     assert.equal(stored.status.tt0133093, 'viewed');
     assert.equal(stored.reviews.tt0133093, undefined);
 });
@@ -51,15 +51,17 @@ test('a film can sit on two lists and the manifest picks up a new list immediate
         actions.addFilmToList(library, second.id, matrix.imdbId);
         actions.reorderLists(library, [second.id, first.id]);
     });
-    const stored = load(token);
+    const stored = await load(token);
     assert.equal(stored.lists[0].name, 'Rewatch');
     await update(token, (library) => actions.setStatus(library, matrix.imdbId, 'viewed'));
-    const viewed = load(token);
+    const viewed = await load(token);
     assert.deepEqual(shelfMetas(viewed, `list_${stored.lists[0].id}`), []);
     assert.equal(stored.lists[1].name, 'Sunday');
     const manifest = manifestFor(stored);
-    assert.equal(manifest.catalogs.some((catalog) => catalog.name === 'Rewatch'), true);
-    assert.equal(manifest.catalogs.some((catalog) => catalog.name === 'Sunday'), true);
+    assert.equal(manifest.catalogs.some((catalog) => catalog.name === 'Shelves · Rewatch'), true);
+    assert.equal(manifest.catalogs.some((catalog) => catalog.name === 'Shelves · Sunday'), true);
+    assert.equal(manifest.catalogs[0].name, 'Shelves · Library');
+    assert.deepEqual(manifest.idPrefixes, ['tt']);
     assert.equal(manifest.resources.includes('stream'), false);
 });
 
@@ -77,7 +79,7 @@ test('series get their own catalogs and never leak into movie rows', async () =>
         actions.upsertFilm(library, matrix, 'library');
         actions.upsertFilm(library, { imdbId: 'tt0903747', type: 'series', title: 'Breaking Bad', genres: ['Drama'] }, 'viewed');
     });
-    const stored = load(token);
+    const stored = await load(token);
     assert.deepEqual(shelfMetas(stored, 'library', {}, 'movie').map((meta) => meta.id), ['tt0133093']);
     assert.deepEqual(shelfMetas(stored, 'library', {}, 'series'), []);
     assert.equal(shelfMetas(stored, 'viewed', {}, 'series')[0].type, 'series');
@@ -92,7 +94,7 @@ test('viewed date can be moved for calendar grouping', async () => {
     await update(token, (library) => actions.upsertFilm(library, matrix, 'viewed'));
     const day = Date.UTC(2026, 0, 15);
     await update(token, (library) => actions.setViewedAt(library, matrix.imdbId, day));
-    assert.equal(load(token).films[matrix.imdbId].viewedAt, day);
+    assert.equal((await load(token)).films[matrix.imdbId].viewedAt, day);
     await assert.rejects(update(token, (library) => actions.setViewedAt(library, matrix.imdbId, 'soon')));
 });
 
