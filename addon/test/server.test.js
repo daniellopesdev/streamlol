@@ -33,10 +33,10 @@ test('a remembered library cookie skips creating a new library', async () => {
         assert.match(cookie, new RegExp(`streamlol_token=${token}`));
         const jar = cookie.split(';')[0];
 
-        for (const url of ['/', '/configure']) {
-            const again = await fetch(`${base}${url}`, { redirect: 'manual', headers: { cookie: jar } });
-            assert.equal(again.headers.get('location'), `/${token}/`);
-        }
+        const home = await fetch(`${base}/`, { redirect: 'manual', headers: { cookie: jar } });
+        assert.equal(home.status, 200, 'home page stays reachable when a library is remembered');
+        const again = await fetch(`${base}/configure`, { redirect: 'manual', headers: { cookie: jar } });
+        assert.equal(again.headers.get('location'), `/${token}/`);
         const fresh = await fetch(`${base}/configure?new=1`, { redirect: 'manual', headers: { cookie: jar } });
         assert.notEqual(fresh.headers.get('location'), `/${token}/`);
     } finally {

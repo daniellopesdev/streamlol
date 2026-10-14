@@ -5,12 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Streamlol — your Stremio, curated</title>
   <meta name="description" content="Library, viewed history, reviews, lists and an advanced Discover for Stremio. Search by director, actor, Criterion Collection, IMDb rating and streaming platform.">
-  <script>
-    try {
-      var saved = localStorage.getItem('streamlol_token');
-      if (saved && /^[a-f0-9]{24}$/.test(saved)) location.replace('/' + saved + '/');
-    } catch (e) {}
-  </script>
   <link rel="stylesheet" href="/shelves/styles.css">
 </head>
 <body class="welcome">
@@ -18,7 +12,7 @@
     <div class="brand"><span class="brand-mark"></span>streamlol<span class="brand-tag">shelves</span></div>
     <div class="topbar-actions">
       <a class="btn ghost" href="https://github.com/daniellopesdev/streamlol" target="_blank" rel="noopener">GitHub</a>
-      <a class="btn primary" href="/configure?new=1">Create library</a>
+      <a class="btn primary" href="/configure?new=1" data-saved-href>Create library</a>
     </div>
   </header>
 
@@ -32,9 +26,13 @@
           every film by a director, every role of an actor, the full Criterion Collection,
           IMDb rating, genre, decade and streaming platform.
         </p>
-        <div class="cta-row">
+        <div class="cta-row" id="cta-new">
           <a class="btn primary lg" href="/configure?new=1">Create my library →</a>
           <button type="button" class="btn ghost lg" id="open-existing">I already have one</button>
+        </div>
+        <div class="cta-row" id="cta-saved" hidden>
+          <a class="btn primary lg" id="open-saved" href="#">Open my library →</a>
+          <a class="btn ghost lg" href="/configure?new=1" id="create-another">Create a new library</a>
         </div>
         <form class="existing" id="existing-form" hidden>
           <input class="input grow" id="existing-input" autocomplete="off" spellcheck="false"
@@ -114,6 +112,26 @@
 
   <script>
     (function () {
+      var TOKEN = /^[a-f0-9]{24}$/;
+      var saved = null;
+      try { saved = localStorage.getItem('streamlol_token'); } catch (e) {}
+      if (!saved || !TOKEN.test(saved)) {
+        var cookie = /(?:^|;\s*)streamlol_token=([a-f0-9]{24})/.exec(document.cookie);
+        saved = cookie ? cookie[1] : null;
+      }
+      if (saved && TOKEN.test(saved)) {
+        var href = '/' + saved + '/';
+        document.getElementById('cta-new').hidden = true;
+        document.getElementById('cta-saved').hidden = false;
+        document.getElementById('open-saved').href = href;
+        document.querySelectorAll('a[href="/configure?new=1"]:not(#create-another)').forEach(function (link) {
+          link.href = href;
+          link.textContent = link.hasAttribute('data-saved-href') ? 'My library' : 'Open my library →';
+        });
+        document.getElementById('create-another').onclick = function (event) {
+          if (!confirm('Create a new empty library? Your current one stays at its link, but this device will switch to the new one.')) event.preventDefault();
+        };
+      }
       var form = document.getElementById('existing-form');
       var input = document.getElementById('existing-input');
       var error = document.getElementById('existing-error');

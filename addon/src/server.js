@@ -86,11 +86,6 @@ function createApp() {
     }));
 
     app.get('/', (req, res) => {
-        const token = rememberedToken(req);
-        if (token) {
-            res.redirect(`/${token}/`);
-            return;
-        }
         res.sendFile(WELCOME);
     });
 
