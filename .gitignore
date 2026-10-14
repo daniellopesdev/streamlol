@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Secrets and local library data
+.env
+**/.env
+!.env.example
+!**/.env.example
+addon/data/*.json
+!addon/data/.gitkeep
+
+# Build output
+web/build/
+desktop/dist/
+desktop/out/
+*.log
+.DS_Store
+Thumbs.db
+
+# Nested upstream clone metadata (vendored into this repo)
+web/.git.upstream-stremio/
+
+# IDE / tooling
+.idea/
+.vscode/
+*.swp
+.pnpm-store/

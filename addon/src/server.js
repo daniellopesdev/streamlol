@@ -1,0 +1,302 @@
+require('dotenv').config();
+
+const express = require('express');
+const { toMeta } = require('./catalog');
+const { discover, reference } = require('./discover');
+const { credentialFor, credentialSource, verifyCredential } = require('./tmdb');
+const { details, suggestions, personFilms } = require('./details');
+const { createInterface } = require('./manifest');
+const { configurePage } = require('./configurePage');
+const { TOKEN_RE, load, update, createToken } = require('./store');
+const actions = require('./library');
+
+function readToken(raw) {
+    if (TOKEN_RE.test(raw)) return raw;
+    try {
+        const json = JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
+        if (json && TOKEN_RE.test(json.token)) return json.token;
+    } catch {
+        return null;
+    }
+    return null;
+}
+
+function asyncRoute(handler) {
+    return (req, res, next) => {
+        Promise.resolve(handler(req, res)).catch(next);
+    };
+}
+
+function publicLibrary(library) {
+    const { tmdbToken, ...settings } = library.settings;
+    return { ...library, settings: { ...settings, tmdb: credentialSource(library) } };
+}
+
+function publicUrl(req, token, suffix) {
+    const host = req.get('host');
+    return `${req.protocol}://${host}/${token}/${suffix}`;
+}
+
+function createApp() {
+    const app = express();
+    app.set('trust proxy', true);
+    app.use(express.json({ limit: '1mb' }));
+    app.use((req, res, next) => {
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Cache-Control', 'no-store');
+        if (req.method === 'OPTIONS') {
+            res.sendStatus(204);
+            return;
+        }
+        next();
+    });
+
+    app.get('/', (req, res) => {
+        res.redirect('/configure');
+    });
+
+    app.get('/configure', (req, res) => {
+        const token = createToken();
+        update(token, () => {}).then(() => {
+            res.redirect(`/${token}/configure`);
+        }).catch((error) => {
+            res.status(500).send(error.message);
+        });
+    });
+
+    app.get('/:config/configure', (req, res) => {
+        const token = readToken(req.params.config);
+        if (!token) {
+            res.redirect('/configure');
+            return;
+        }
+        const manifestUrl = publicUrl(req, token, 'manifest.json');
+        const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
+        update(token, () => {}).then((library) => {
+            res.type('html').send(configurePage({ manifestUrl, installUrl, token, tmdb: credentialSource(library) }));
+        }).catch((error) => {
+            res.status(500).send(error.message);
+        });
+    });
+
+    app.get('/:config/manifest.json', asyncRoute(async (req, res) => {
+        const token = readToken(req.params.config);
+        if (!token) {
+            res.status(404).json({ err: 'Invalid token' });
+            return;
+        }
+        const iface = createInterface(load(token), resolveView);
+        res.json(iface.manifest);
+    }));
+
+    app.get('/:config/catalog/:type/:id.json', catalogRoute);
+    app.get('/:config/catalog/:type/:id/:extra.json', catalogRoute);
+
+    app.get('/api/:token', (req, res, next) => {
+        try {
+            res.json(publicLibrary(load(req.params.token)));
+        } catch (error) {
+            next(error);
+        }
+    });
+
+    app.get('/api/:token/reference', asyncRoute(async (req, res) => {
+        const library = load(req.params.token);
+        const country = /^[A-Z]{2}$/.test(req.query.country || '') ? req.query.country : library.settings.country;
+        res.json(await reference(credentialFor(library), country, req.query.type));
+    }));
+
+    app.get('/api/:token/details/:type/:imdbId', asyncRoute(async (req, res) => {
+        res.json(await details(load(req.params.token), req.params.type, req.params.imdbId));
+    }));
+
+    app.get('/api/:token/suggestions/:type/:imdbId', asyncRoute(async (req, res) => {
+        res.json(await suggestions(load(req.params.token), req.params.type, req.params.imdbId));
+    }));
+
+    app.get('/api/:token/person/:personId', asyncRoute(async (req, res) => {
+        if (!/^\d+$/.test(req.params.personId)) {
+            res.status(400).json({ err: 'Invalid person id' });
+            return;
+        }
+        const library = load(req.params.token);
+        res.json(await personFilms(library, req.query.type, req.params.personId, req.query.role, String(req.query.name || '').slice(0, 120), req.query.exclude));
+    }));
+
+    app.put('/api/:token/tmdb', asyncRoute(async (req, res) => {
+        load(req.params.token);
+        const credential = await verifyCredential(req.body?.token);
+        const library = await update(req.params.token, (draft) => {
+            draft.settings.tmdbToken = credential;
+            return draft;
+        });
+        res.json(publicLibrary(library).settings);
+    }));
+
+    app.delete('/api/:token/tmdb', asyncRoute(async (req, res) => {
+        const library = await update(req.params.token, (draft) => {
+            delete draft.settings.tmdbToken;
+            return draft;
+        });
+        res.json(publicLibrary(library).settings);
+    }));
+
+    app.get('/api/:token/discover', asyncRoute(async (req, res) => {
+        const library = load(req.params.token);
+        const filters = actions.cleanFilters({
+            ...req.query,
+            hideViewed: req.query.hideViewed === undefined ? library.settings.hideViewed : req.query.hideViewed !== 'false',
+            country: req.query.country || library.settings.country,
+        });
+        res.json(await discover(library, filters, req.query.cursor || null));
+    }));
+
+    app.put('/api/:token/settings', asyncRoute(async (req, res) => {
+        const library = await update(req.params.token, (draft) => {
+            actions.updateSettings(draft, req.body || {});
+            return draft;
+        });
+        res.json(publicLibrary(library).settings);
+    }));
+
+    app.post('/api/:token/films', asyncRoute(async (req, res) => {
+        const film = await update(req.params.token, (library) => actions.upsertFilm(library, req.body || {}, req.body?.status));
+        res.json(film);
+    }));
+
+    app.post('/api/:token/films/:imdbId/status', asyncRoute(async (req, res) => {
+        const film = await update(req.params.token, (library) => actions.setStatus(library, req.params.imdbId, req.body?.status));
+        res.json(film);
+    }));
+
+    app.post('/api/:token/films/:imdbId/viewed-at', asyncRoute(async (req, res) => {
+        const film = await update(req.params.token, (library) => actions.setViewedAt(library, req.params.imdbId, req.body?.viewedAt));
+        res.json(film);
+    }));
+
+    app.post('/api/:token/films/:imdbId/review', asyncRoute(async (req, res) => {
+        const review = await update(req.params.token, (library) => actions.setReview(library, req.params.imdbId, req.body || {}));
+        res.json(review);
+    }));
+
+    app.delete('/api/:token/films/:imdbId/review', asyncRoute(async (req, res) => {
+        await update(req.params.token, (library) => actions.clearReview(library, req.params.imdbId));
+        res.json({ ok: true });
+    }));
+
+    app.delete('/api/:token/films/:imdbId', asyncRoute(async (req, res) => {
+        await update(req.params.token, (library) => actions.removeFilm(library, req.params.imdbId));
+        res.json({ ok: true });
+    }));
+
+    app.post('/api/:token/lists', asyncRoute(async (req, res) => {
+        const list = await update(req.params.token, (library) => actions.addList(library, req.body?.name));
+        res.json(list);
+    }));
+
+    app.post('/api/:token/lists/reorder', asyncRoute(async (req, res) => {
+        await update(req.params.token, (library) => actions.reorderLists(library, req.body?.ids || []));
+        res.json({ ok: true });
+    }));
+
+    app.patch('/api/:token/lists/:id', asyncRoute(async (req, res) => {
+        const list = await update(req.params.token, (library) => actions.renameList(library, req.params.id, req.body?.name));
+        res.json(list);
+    }));
+
+    app.delete('/api/:token/lists/:id', asyncRoute(async (req, res) => {
+        await update(req.params.token, (library) => actions.deleteList(library, req.params.id));
+        res.json({ ok: true });
+    }));
+
+    app.post('/api/:token/lists/:id/films', asyncRoute(async (req, res) => {
+        const list = await update(req.params.token, (library) => {
+            if (req.body?.film) actions.upsertFilm(library, req.body.film, req.body.film.status);
+            return actions.addFilmToList(library, req.params.id, req.body?.imdbId || req.body?.film?.imdbId);
+        });
+        res.json(list);
+    }));
+
+    app.delete('/api/:token/lists/:id/films/:imdbId', asyncRoute(async (req, res) => {
+        const list = await update(req.params.token, (library) => actions.removeFilmFromList(library, req.params.id, req.params.imdbId));
+        res.json(list);
+    }));
+
+    app.post('/api/:token/views', asyncRoute(async (req, res) => {
+        const view = await update(req.params.token, (library) => actions.addView(library, req.body?.name, req.body?.filters));
+        res.json(view);
+    }));
+
+    app.delete('/api/:token/views/:id', asyncRoute(async (req, res) => {
+        await update(req.params.token, (library) => actions.deleteView(library, req.params.id));
+        res.json({ ok: true });
+    }));
+
+    app.use((error, req, res, next) => {
+        if (res.headersSent) {
+            next(error);
+            return;
+        }
+        res.status(error.status || 500).json({ err: error.message || 'Request failed', code: error.code });
+    });
+
+    return app;
+}
+
+const viewCursors = new Map();
+
+async function resolveView(library, view, skip) {
+    const key = (offset) => `${view.id}:${JSON.stringify(view.filters)}:${offset}`;
+    const cursor = skip ? viewCursors.get(key(skip)) : null;
+    if (skip && !cursor) return [];
+    try {
+        const found = await discover(library, view.filters || {}, cursor);
+        if (found.nextCursor) {
+            if (viewCursors.size > 5000) viewCursors.clear();
+            viewCursors.set(key(skip + found.results.length), found.nextCursor);
+        }
+        return found.results.map((film) => toMeta(film));
+    } catch {
+        return [];
+    }
+}
+
+function parseExtra(segment) {
+    if (!segment) return {};
+    const extra = {};
+    decodeURIComponent(segment).split('&').forEach((part) => {
+        const index = part.indexOf('=');
+        if (index === -1) return;
+        extra[decodeURIComponent(part.slice(0, index))] = decodeURIComponent(part.slice(index + 1));
+    });
+    return extra;
+}
+
+function catalogRoute(req, res, next) {
+    const token = readToken(req.params.config);
+    if (!token) {
+        res.status(404).json({ err: 'Invalid token' });
+        return;
+    }
+    const iface = createInterface(load(token), resolveView);
+    Promise.resolve(iface.get('catalog', req.params.type, req.params.id, parseExtra(req.params.extra)))
+        .then((payload) => res.json(payload))
+        .catch(next);
+}
+
+function listen(port = Number(process.env.PORT) || 7000) {
+    const app = createApp();
+    return app.listen(port);
+}
+
+if (require.main === module) {
+    const server = listen();
+    server.on('listening', () => {
+        const address = server.address();
+        console.log(`Streamlol addon listening on ${address.port}`);
+    });
+}
+
+module.exports = { createApp, listen, readToken };

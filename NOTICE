@@ -1,0 +1,12 @@
+Streamlol
+Copyright (C) 2026 Streamlol contributors
+
+This product includes software developed from Stremio Web
+(https://github.com/Stremio/stremio-web), Copyright (C) Smart Code OOD,
+licensed under the GNU General Public License version 2.
+
+Upstream baseline: stremio-web v5.0.0-beta.42
+(commit 9d1d526591b4c076c7307a1ba9ec056d483f169a)
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
+See https://www.themoviedb.org/documentation/api

@@ -1,0 +1,14 @@
+{
+  "name": "streamlol-desktop",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Electron shell for the Streamlol Shelves web build",
+  "license": "GPL-2.0-only",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.4.11"
+  }
+}
