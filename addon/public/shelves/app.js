@@ -1342,12 +1342,29 @@
         const refresh = async () => { await reload(); await showFilmModal(); render(); };
         const stored = state.library.films[data.imdbId];
         const status = state.library.status[data.imdbId];
+        const label = filmLabel(data);
         if (!stored) {
-            actions.appendChild(button('+ Library', 'btn', async () => { await api('/films', { method: 'POST', body: { ...payload, status: 'library' } }); await refresh(); }));
-            actions.appendChild(button('✓ Mark viewed', 'btn', async () => { await api('/films', { method: 'POST', body: { ...payload, status: 'viewed' } }); await refresh(); }));
+            actions.appendChild(button('+ Library', 'btn', async () => {
+                await api('/films', { method: 'POST', body: { ...payload, status: 'library' } });
+                toast(`Added “${label}” to Library`);
+                await refresh();
+            }));
+            actions.appendChild(button('✓ Mark viewed', 'btn', async () => {
+                await api('/films', { method: 'POST', body: { ...payload, status: 'viewed' } });
+                toast(`Marked “${label}” as viewed`);
+                await refresh();
+            }));
         } else {
             actions.appendChild(button(status === 'viewed' ? '✓ Viewed' : '✓ Mark viewed', `btn ${status === 'viewed' ? 'on' : ''}`, async () => {
-                await api(`/films/${data.imdbId}/status`, { method: 'POST', body: { status: status === 'viewed' ? 'library' : 'viewed' } });
+                const next = status === 'viewed' ? 'library' : 'viewed';
+                await api(`/films/${data.imdbId}/status`, { method: 'POST', body: { status: next } });
+                toast(next === 'viewed' ? `Marked “${label}” as viewed` : `“${label}” back in Library`);
+                await refresh();
+            }));
+            actions.appendChild(button('Remove', 'btn ghost danger', async () => {
+                if (!window.confirm(`Remove “${label}” from your library?`)) return;
+                await api(`/films/${data.imdbId}`, { method: 'DELETE' });
+                toast(`Removed “${label}”`);
                 await refresh();
             }));
         }
@@ -1383,6 +1400,7 @@
             scores.appendChild(button(String(score), `score ${review && Math.round(review.score) === score ? 'on' : ''}`, async () => {
                 if (!state.library.films[data.imdbId]) await api('/films', { method: 'POST', body: payload });
                 await api(`/films/${data.imdbId}/review`, { method: 'POST', body: { score, note: review?.note || '' } });
+                toast(`Rated “${label}” ${score}/10`);
                 await refresh();
             }));
         }
@@ -1394,8 +1412,13 @@
             const inList = list.filmIds.includes(data.imdbId);
             listRow.appendChild(button(`${inList ? '✓ ' : '+ '}${escapeHtml(list.name)}`, `chip ${inList ? 'on' : ''}`, async () => {
                 if (!state.library.films[data.imdbId]) await api('/films', { method: 'POST', body: payload });
-                if (inList) await api(`/lists/${list.id}/films/${data.imdbId}`, { method: 'DELETE' });
-                else await api(`/lists/${list.id}/films`, { method: 'POST', body: { imdbId: data.imdbId, film: payload } });
+                if (inList) {
+                    await api(`/lists/${list.id}/films/${data.imdbId}`, { method: 'DELETE' });
+                    toast(`Removed “${label}” from ${list.name}`);
+                } else {
+                    await api(`/lists/${list.id}/films`, { method: 'POST', body: { imdbId: data.imdbId, film: payload } });
+                    toast(`Added “${label}” to ${list.name}`);
+                }
                 await refresh();
             }));
         });
@@ -1492,10 +1515,16 @@
     }
 
     function toast(message) {
+        document.querySelectorAll('.toast').forEach((node) => node.remove());
         const node = el(`<div class="toast">${escapeHtml(message)}</div>`);
         document.body.appendChild(node);
-        setTimeout(() => node.classList.add('out'), 3200);
-        setTimeout(() => node.remove(), 3700);
+        setTimeout(() => node.classList.add('out'), 2800);
+        setTimeout(() => node.remove(), 3300);
+    }
+
+    function filmLabel(film) {
+        const title = (film && (film.title || film.name)) || 'Title';
+        return title.length > 42 ? `${title.slice(0, 40)}…` : title;
     }
 
     async function saveView() {
@@ -1555,6 +1584,7 @@
                 state.library = await api('/stremio', { method: 'DELETE' });
                 setInstallLink();
                 backdrop.remove();
+                toast('Disconnected from Stremio');
                 render();
             }));
             stremioBox.appendChild(row);
@@ -1568,6 +1598,7 @@
             try {
                 await navigator.clipboard.writeText(libraryLink);
                 event.target.textContent = 'Copied ✓';
+                toast('Library link copied');
             } catch {
                 window.prompt('Your library link', libraryLink);
             }
@@ -1589,6 +1620,7 @@
                 await reload();
                 await loadReference();
                 backdrop.remove();
+                toast('TMDB connected');
                 render();
             } catch (error) {
                 backdrop.querySelector('#settings-error').textContent = error.message;
@@ -1600,6 +1632,7 @@
                 await api('/tmdb', { method: 'DELETE' });
                 await reload();
                 backdrop.remove();
+                toast('TMDB token removed');
                 render();
             };
         }
