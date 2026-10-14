@@ -27,4 +27,10 @@ if not exist "addon\node_modules\" (
 
 start "Streamlol addon" /min cmd /c "cd /d "%~dp0addon" && node src\server.js"
 timeout /t 1 /nobreak >nul
-start "" "%~dp0desktop\dist\win-unpacked\Streamlol.exe"
+if exist "%~dp0desktop\dist\win-unpacked\Streamlol.exe" (
+  start "" "%~dp0desktop\dist\win-unpacked\Streamlol.exe"
+) else (
+  pushd desktop
+  call npm start
+  popd
+)

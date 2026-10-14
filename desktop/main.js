@@ -3,6 +3,8 @@ const fs = require('fs');
 const http = require('http');
 const path = require('path');
 
+const DESKTOP_PORT = Number(process.env.STREAMLOL_DESKTOP_PORT) || 17811;
+
 const buildDir = app.isPackaged
     ? path.join(process.resourcesPath, 'web-build')
     : path.resolve(__dirname, '..', 'web', 'build');
@@ -27,10 +29,62 @@ const MIME = {
     '.txt': 'text/plain; charset=utf-8',
 };
 
+function configPath() {
+    return path.join(app.getPath('userData'), 'streamlol-desktop.json');
+}
+
+function readConfig() {
+    try {
+        return JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+function writeConfig(patch) {
+    const next = { ...readConfig(), ...patch, updatedAt: Date.now() };
+    fs.mkdirSync(path.dirname(configPath()), { recursive: true });
+    fs.writeFileSync(configPath(), JSON.stringify(next, null, 2));
+    return next;
+}
+
 function serveBuild() {
     return new Promise((resolve, reject) => {
         const server = http.createServer((req, res) => {
             const url = new URL(req.url, 'http://127.0.0.1');
+
+            if (url.pathname === '/__streamlol__/config.json') {
+                if (req.method === 'GET') {
+                    res.writeHead(200, {
+                        'Content-Type': 'application/json',
+                        'Cache-Control': 'no-store',
+                    });
+                    res.end(JSON.stringify(readConfig()));
+                    return;
+                }
+                if (req.method === 'PUT' || req.method === 'POST') {
+                    let body = '';
+                    req.on('data', (chunk) => { body += chunk; });
+                    req.on('end', () => {
+                        try {
+                            const payload = JSON.parse(body || '{}');
+                            const saved = writeConfig({
+                                transportUrl: typeof payload.transportUrl === 'string' ? payload.transportUrl : '',
+                            });
+                            res.writeHead(200, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify(saved));
+                        } catch (error) {
+                            res.writeHead(400, { 'Content-Type': 'application/json' });
+                            res.end(JSON.stringify({ err: error.message }));
+                        }
+                    });
+                    return;
+                }
+                res.writeHead(405);
+                res.end();
+                return;
+            }
+
             const requested = decodeURIComponent(url.pathname);
             let filePath = path.normalize(path.join(buildDir, requested));
             const root = buildDir.endsWith(path.sep) ? buildDir : buildDir + path.sep;
@@ -52,7 +106,7 @@ function serveBuild() {
                 res.end(body);
             });
         });
-        server.listen(0, '127.0.0.1', () => resolve(server));
+        server.listen(DESKTOP_PORT, '127.0.0.1', () => resolve(server));
         server.on('error', reject);
     });
 }
@@ -68,7 +122,11 @@ async function openWindow() {
         backgroundColor: '#0b0d12',
         autoHideMenuBar: true,
         icon: fs.existsSync(iconPath) ? iconPath : undefined,
-        webPreferences: { contextIsolation: true, nodeIntegration: false },
+        webPreferences: {
+            contextIsolation: true,
+            nodeIntegration: false,
+            partition: 'persist:streamlol',
+        },
     });
     const override = process.env.STREAMLOL_WEB_URL;
     if (override) {
@@ -79,10 +137,18 @@ async function openWindow() {
         await window.loadURL(missingPage());
         return;
     }
-    const server = await serveBuild();
-    const { port } = server.address();
+    let server;
+    try {
+        server = await serveBuild();
+    } catch (error) {
+        if (error && error.code === 'EADDRINUSE') {
+            await window.loadURL(`http://127.0.0.1:${DESKTOP_PORT}/`);
+            return;
+        }
+        throw error;
+    }
     app.on('before-quit', () => server.close());
-    await window.loadURL(`http://127.0.0.1:${port}/`);
+    await window.loadURL(`http://127.0.0.1:${DESKTOP_PORT}/`);
 }
 
 app.whenReady().then(openWindow);

@@ -3,7 +3,7 @@ const PropTypes = require('prop-types');
 const { useNavigate } = require('react-router');
 const { MainNavBars, MetaItem, TextInput } = require('stremio/components');
 const { useProfile } = require('stremio/common');
-const { ADDON_ID, connectionFor, connectionFromTransport, rememberTransport, request } = require('./api');
+const { ADDON_ID, connectionFor, connectionFromTransport, rememberTransport, restoreTransport, request } = require('./api');
 const { Pill, ChipRow } = require('./controls');
 const FilmPanel = require('./FilmPanel');
 const SettingsPanel = require('./SettingsPanel');
@@ -170,7 +170,21 @@ const Shelves = () => {
         .map((addon) => addon.transportUrl)
         .join();
     const [manualConnection, setManualConnection] = React.useState(null);
-    const connection = React.useMemo(() => manualConnection || connectionFor(profile), [manualConnection, installedUrl]);
+    const [boot, setBoot] = React.useState(0);
+    const connection = React.useMemo(() => manualConnection || connectionFor(profile), [manualConnection, installedUrl, boot]);
+
+    React.useEffect(() => {
+        let cancelled = false;
+        restoreTransport().then((url) => {
+            if (cancelled) return;
+            const restored = connectionFromTransport(url);
+            if (restored) setManualConnection(restored);
+            setBoot((value) => value + 1);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const [library, setLibrary] = React.useState(null);
     const [reference, setReference] = React.useState({ source: null, genres: [], providers: [], countries: [] });
