@@ -29,16 +29,45 @@ const TOKEN_KEY = 'streamlol_token';
 const WELCOME = path.join(__dirname, '..', 'public', 'shelves', 'welcome.html');
 const ONE_YEAR_S = 365 * 24 * 60 * 60;
 
-function rememberedToken(req) {
+const STREMIO_KEY = 'streamlol_stremio';
+
+function readCookie(req, name) {
     const header = req.get('cookie') || '';
-    const match = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${TOKEN_KEY}=`));
-    const value = match ? decodeURIComponent(match.slice(TOKEN_KEY.length + 1)) : '';
+    const match = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
+    return match ? decodeURIComponent(match.slice(name.length + 1)) : '';
+}
+
+function secureFlag(req) {
+    return (req.get('x-forwarded-proto') || req.protocol || '').startsWith('https') ? '; Secure' : '';
+}
+
+function rememberedToken(req) {
+    const value = readCookie(req, TOKEN_KEY);
     return TOKEN_RE.test(value) ? value : null;
 }
 
 function rememberToken(req, res, token) {
-    const secure = (req.get('x-forwarded-proto') || req.protocol || '').startsWith('https') ? '; Secure' : '';
-    res.append('Set-Cookie', `${TOKEN_KEY}=${token}; Max-Age=${ONE_YEAR_S}; Path=/; SameSite=Lax${secure}`);
+    res.append('Set-Cookie', `${TOKEN_KEY}=${token}; Max-Age=${ONE_YEAR_S}; Path=/; SameSite=Lax${secureFlag(req)}`);
+}
+
+// The Stremio session key stays on the device that signed in (HttpOnly), so other
+// libraries on that device can connect without asking for the password again.
+function deviceStremio(req) {
+    try {
+        const json = JSON.parse(Buffer.from(readCookie(req, STREMIO_KEY), 'base64url').toString('utf8'));
+        return json && typeof json.authKey === 'string' && json.authKey ? { authKey: json.authKey, email: String(json.email || '') } : null;
+    } catch {
+        return null;
+    }
+}
+
+function rememberStremio(req, res, link) {
+    const value = Buffer.from(JSON.stringify({ authKey: link.authKey, email: link.email })).toString('base64url');
+    res.append('Set-Cookie', `${STREMIO_KEY}=${value}; Max-Age=${ONE_YEAR_S}; Path=/; HttpOnly; SameSite=Lax${secureFlag(req)}`);
+}
+
+function forgetStremio(req, res) {
+    res.append('Set-Cookie', `${STREMIO_KEY}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secureFlag(req)}`);
 }
 
 function asyncRoute(handler) {
@@ -225,9 +254,32 @@ function createApp() {
         res.json(await searchScopes(credential, req.query.q, req.query.type));
     }));
 
+    app.get('/api/:token/stremio/device', (req, res) => {
+        const saved = deviceStremio(req);
+        res.json({ email: saved ? saved.email : null, saved: Boolean(saved) });
+    });
+
+    app.delete('/api/:token/stremio/device', (req, res) => {
+        forgetStremio(req, res);
+        res.json({ ok: true });
+    });
+
     app.post('/api/:token/stremio', asyncRoute(async (req, res) => {
         await load(req.params.token);
-        const link = await stremio.connect(req.body || {});
+        const body = req.body || {};
+        let link;
+        if (body.device) {
+            const saved = deviceStremio(req);
+            if (!saved) throw Object.assign(new Error('No saved Stremio session on this device. Sign in again.'), { status: 400 });
+            link = await stremio.connect({ authKey: saved.authKey }).catch((error) => {
+                if (error.status >= 500) throw error;
+                forgetStremio(req, res);
+                throw Object.assign(new Error('Your saved Stremio session expired. Sign in again.'), { status: 401, cause: error });
+            });
+        } else {
+            link = await stremio.connect(body);
+        }
+        rememberStremio(req, res, link);
         await update(req.params.token, (draft) => {
             draft.stremio = { authKey: link.authKey, email: link.email };
         });

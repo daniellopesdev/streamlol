@@ -44,6 +44,38 @@ test('a remembered library cookie skips creating a new library', async () => {
     }
 });
 
+test('a saved Stremio session is reported by email only and can be forgotten', async () => {
+    const app = createApp();
+    const server = await new Promise((resolve) => {
+        const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+        const created = await fetch(`${base}/configure`, { redirect: 'manual' });
+        const token = created.headers.get('location').split('/')[1];
+
+        const none = await json(`${base}/api/${token}/stremio/device`);
+        assert.deepEqual(none, { email: null, saved: false });
+        const missing = await fetch(`${base}/api/${token}/stremio`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device: true }),
+        });
+        assert.equal(missing.status, 400);
+
+        const value = Buffer.from(JSON.stringify({ authKey: 'secret-key', email: 'me@example.com' })).toString('base64url');
+        const saved = await fetch(`${base}/api/${token}/stremio/device`, { headers: { cookie: `streamlol_stremio=${value}` } });
+        const body = await saved.text();
+        assert.deepEqual(JSON.parse(body), { email: 'me@example.com', saved: true });
+        assert.equal(body.includes('secret-key'), false);
+
+        const forgot = await fetch(`${base}/api/${token}/stremio/device`, { method: 'DELETE' });
+        assert.match(forgot.headers.get('set-cookie'), /streamlol_stremio=; Max-Age=0; Path=\/; HttpOnly/);
+    } finally {
+        await new Promise((resolve) => server.close(resolve));
+    }
+});
+
 test('catalogs are generated from the live library file', async () => {
     const app = createApp();
     const server = await new Promise((resolve) => {

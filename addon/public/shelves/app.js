@@ -29,6 +29,7 @@
         active: { kind: 'discover' },
         type: 'movie',
         filtersOpen: false,
+        draft: null,
         allPlatforms: false,
         listsOpen: false,
         filters: blankFilters(),
@@ -169,8 +170,7 @@
         return state.library;
     }
 
-    async function loadReference() {
-        const country = state.filters.country || state.library?.settings?.country || 'US';
+    async function loadReference(country = state.filters.country || state.library?.settings?.country || 'US') {
         state.reference = await api(`/reference?country=${encodeURIComponent(country)}&type=${state.type}`);
     }
 
@@ -685,8 +685,8 @@
         controls.appendChild(segmented(sorts, f.sort, (id) => { f.sort = id; scheduleSearch(); }, 'sorts'));
         const count = filterCount();
         controls.appendChild(button(`Filters${count ? ` <span class="count">${count}</span>` : ''}`, `btn ${state.filtersOpen ? 'on' : ''}`, () => {
-            state.filtersOpen = !state.filtersOpen;
-            render();
+            if (state.filtersOpen) closeFilters();
+            else openFilters();
         }));
         controls.appendChild(button('Save as Board row', 'btn ghost', () => saveView()));
         view.appendChild(controls);
@@ -737,8 +737,35 @@
         return section;
     }
 
+    const DRAWER_KEYS = ['genres', 'excludeGenres', 'yearFrom', 'yearTo', 'minImdb', 'minVotes', 'platforms', 'country', 'hideViewed'];
+
+    function drawerFields(filters) {
+        return JSON.parse(JSON.stringify(Object.fromEntries(DRAWER_KEYS.map((key) => [key, filters[key]]))));
+    }
+
+    function draftChanged() {
+        return JSON.stringify(state.draft) !== JSON.stringify(drawerFields(state.filters));
+    }
+
+    function openFilters() {
+        state.draft = drawerFields(state.filters);
+        state.filtersOpen = true;
+        render();
+    }
+
+    async function closeFilters() {
+        const changed = state.draft && draftChanged();
+        const countryChanged = changed && state.draft.country !== state.filters.country;
+        if (changed) Object.assign(state.filters, state.draft);
+        state.draft = null;
+        state.filtersOpen = false;
+        if (!changed) return render();
+        if (countryChanged) await loadReference().catch(() => {});
+        scheduleSearch();
+    }
+
     function filterDrawer() {
-        const f = state.filters;
+        const f = state.draft || (state.draft = drawerFields(state.filters));
         const drawer = el('<div class="drawer"></div>');
 
         if (state.reference.genres?.length) {
@@ -751,7 +778,7 @@
                     f.excludeGenres = f.excludeGenres.filter((item) => item !== id);
                     if (!mode) f.genres.push(id);
                     else if (mode === 'on') f.excludeGenres.push(id);
-                    scheduleSearch();
+                    render();
                 }));
             });
             const section = drawerSection('Genres', genres);
@@ -762,8 +789,8 @@
         const years = el('<div class="years"></div>');
         const from = el(`<input class="input num" type="number" min="1900" max="${THIS_YEAR}" placeholder="From" value="${escapeHtml(f.yearFrom)}">`);
         const to = el(`<input class="input num" type="number" min="1900" max="${THIS_YEAR + 2}" placeholder="To" value="${escapeHtml(f.yearTo)}">`);
-        from.onchange = () => { f.yearFrom = from.value.slice(0, 4); scheduleSearch(); };
-        to.onchange = () => { f.yearTo = to.value.slice(0, 4); scheduleSearch(); };
+        from.onchange = () => { f.yearFrom = from.value.slice(0, 4); render(); };
+        to.onchange = () => { f.yearTo = to.value.slice(0, 4); render(); };
         years.append(from, el('<span class="dash">–</span>'), to);
         const decades = el('<div class="chips"></div>');
         DECADES.forEach(([label, yearFrom, yearTo]) => {
@@ -771,16 +798,16 @@
             decades.appendChild(button(label, `chip ${on ? 'on' : ''}`, () => {
                 f.yearFrom = on ? '' : yearFrom;
                 f.yearTo = on ? '' : yearTo;
-                scheduleSearch();
+                render();
             }));
         });
         years.appendChild(decades);
         drawer.appendChild(drawerSection('Years', years));
 
         const scores = el('<div class="split"></div>');
-        scores.appendChild(segmented(IMDB_STEPS, f.minImdb, (id) => { f.minImdb = id; scheduleSearch(); }, 'sm'));
+        scores.appendChild(segmented(IMDB_STEPS, f.minImdb, (id) => { f.minImdb = id; render(); }, 'sm'));
         drawer.appendChild(drawerSection('IMDb', scores));
-        drawer.appendChild(drawerSection('Votes', segmented(VOTE_STEPS, f.minVotes, (id) => { f.minVotes = id; scheduleSearch(); }, 'sm')));
+        drawer.appendChild(drawerSection('Votes', segmented(VOTE_STEPS, f.minVotes, (id) => { f.minVotes = id; render(); }, 'sm')));
 
         const where = el('<div class="where"></div>');
         const country = el('<select class="input select"></select>');
@@ -790,8 +817,8 @@
         country.onchange = async () => {
             f.country = country.value;
             f.platforms = [];
-            await loadReference().catch(() => {});
-            scheduleSearch();
+            await loadReference(f.country).catch(() => {});
+            render();
         };
         where.appendChild(country);
         const providers = state.reference.providers || [];
@@ -803,7 +830,7 @@
                 const on = f.platforms.includes(id);
                 list.appendChild(button(escapeHtml(provider.name), `chip ${on ? 'on' : ''}`, () => {
                     f.platforms = on ? f.platforms.filter((item) => item !== id) : [...f.platforms, id];
-                    scheduleSearch();
+                    render();
                 }));
             });
             if (providers.length > 14) {
@@ -823,15 +850,16 @@
             <span>Hide titles I've viewed</span>
           </label>
         `);
-        toggle.querySelector('input').onchange = (event) => { f.hideViewed = event.target.checked; scheduleSearch(); };
+        toggle.querySelector('input').onchange = (event) => { f.hideViewed = event.target.checked; render(); };
         drawer.appendChild(drawerSection('Viewed', toggle));
 
         const foot = el('<div class="drawer-foot"></div>');
         foot.appendChild(button('Reset filters', 'btn ghost sm', () => {
-            state.filters = blankFilters({ country: f.country, scope: f.scope, sort: f.sort, q: f.q });
-            scheduleSearch();
+            state.draft = drawerFields(blankFilters({ country: f.country }));
+            render();
         }));
-        foot.appendChild(button('Done', 'btn primary sm', () => { state.filtersOpen = false; render(); }));
+        if (draftChanged()) foot.appendChild(el('<span class="muted small">Applies when you press Done</span>'));
+        foot.appendChild(button('Done', 'btn primary sm', closeFilters));
         drawer.appendChild(foot);
         return drawer;
     }
@@ -891,6 +919,12 @@
               <span class="eyebrow">Stremio account</span>
               <h2>Bring your Stremio library</h2>
               <p class="muted small">Imports your Library and watched history, then keeps syncing. Streamlol only reads — it never changes your Stremio account.</p>
+              <div class="device-login" id="device-login" hidden>
+                <button type="button" class="btn primary wide" id="use-device">Continue as <span></span></button>
+                <p class="error" id="device-error"></p>
+                <button type="button" class="btn ghost sm" id="other-account">Use another account</button>
+              </div>
+              <div id="login-panes">
               <div class="seg tabs-auth" style="margin:0.75rem 0 1rem">
                 <button type="button" class="seg-item on" data-mode="password">Email & password</button>
                 <button type="button" class="seg-item" data-mode="key">Google / Facebook / Apple</button>
@@ -916,6 +950,7 @@
                   <button type="submit" class="btn primary" id="go">Connect & import</button>
                 </div>
               </form>
+              </div>
             </div>
           </div>
         `);
@@ -940,13 +975,9 @@
             } catch { /* manual copy */ }
         };
         form.querySelector('[name=email]').focus();
-        form.onsubmit = async (event) => {
-            event.preventDefault();
-            const err = backdrop.querySelector('#stremio-error');
-            const go = backdrop.querySelector('#go');
-            const body = mode === 'key'
-                ? { authKey: form.authKey.value.trim() }
-                : { email: form.email.value.trim(), password: form.password.value };
+
+        async function connectWith(body, go, err) {
+            const label = go.innerHTML;
             err.textContent = '';
             go.disabled = true;
             go.textContent = 'Importing…';
@@ -958,12 +989,43 @@
                 toast(`Imported ${added} titles from Stremio${viewed ? ` · ${viewed} viewed` : ''}`);
                 if (state.active.kind === 'discover') state.active = { kind: 'library' };
                 render();
+                return true;
             } catch (error) {
                 err.textContent = error.message;
                 go.disabled = false;
-                go.textContent = 'Connect & import';
+                go.innerHTML = label;
+                return false;
             }
+        }
+
+        form.onsubmit = (event) => {
+            event.preventDefault();
+            const body = mode === 'key'
+                ? { authKey: form.authKey.value.trim() }
+                : { email: form.email.value.trim(), password: form.password.value };
+            connectWith(body, backdrop.querySelector('#go'), backdrop.querySelector('#stremio-error'));
         };
+
+        const device = backdrop.querySelector('#device-login');
+        const panes = backdrop.querySelector('#login-panes');
+        const showLogin = () => {
+            device.hidden = true;
+            panes.hidden = false;
+            form.querySelector('[name=email]').focus();
+        };
+        backdrop.querySelector('#other-account').onclick = showLogin;
+        api('/stremio/device').then((saved) => {
+            if (!saved.saved || !backdrop.isConnected) return;
+            const use = backdrop.querySelector('#use-device');
+            use.querySelector('span').textContent = saved.email || 'your Stremio account';
+            device.hidden = false;
+            panes.hidden = true;
+            use.focus();
+            use.onclick = async () => {
+                const ok = await connectWith({ device: true }, use, backdrop.querySelector('#device-error'));
+                if (!ok && backdrop.isConnected) setTimeout(showLogin, 1200);
+            };
+        }).catch(() => {});
     }
 
     function stremioBar() {
@@ -1360,9 +1422,10 @@
         backdrop.querySelector('#new-library').onclick = (event) => {
             if (!window.confirm('Start a new empty library on this device? Keep your current link if you want to come back.')) event.preventDefault();
         };
-        backdrop.querySelector('#forget').onclick = () => {
-            if (!window.confirm('Forget this library on this device? You will need the link to open it again.')) return;
+        backdrop.querySelector('#forget').onclick = async () => {
+            if (!window.confirm('Forget this library and Stremio sign-in on this device? You will need the link to open it again.')) return;
             forgetDevice();
+            await api('/stremio/device', { method: 'DELETE' }).catch(() => {});
             location.href = '/';
         };
         backdrop.querySelector('#save-tmdb').onclick = async () => {
