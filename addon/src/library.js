@@ -21,6 +21,9 @@ function cleanFilm(input, previous = {}) {
         poster: typeof input.poster === 'string' && input.poster.startsWith('https://')
             ? input.poster
             : (previous.poster || null),
+        background: typeof input.background === 'string' && input.background.startsWith('https://')
+            ? input.background
+            : (previous.background || null),
         genres: Array.isArray(input.genres) ? input.genres.map(String).slice(0, 12) : (previous.genres || []),
         imdbRating: input.imdbRating ? String(input.imdbRating) : (previous.imdbRating || null),
         platforms: Array.isArray(input.platforms)

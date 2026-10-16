@@ -32,8 +32,13 @@ test('library and viewed stay separate, and a review marks the film viewed', asy
     await update(token, (library) => actions.setReview(library, 'tt0133093', { score: 9, note: 'Still holds' }));
     stored = await load(token);
     assert.deepEqual(shelfMetas(stored, 'library'), []);
-    assert.equal(shelfMetas(stored, 'viewed')[0].description.includes('Your score: 9/10'), true);
-    assert.equal(shelfMetas(stored, 'reviewed')[0].description.includes('Still holds'), true);
+    const viewed = shelfMetas(stored, 'viewed')[0];
+    assert.equal(viewed.description.includes('Your score: 9/10'), true);
+    assert.equal(viewed.description.includes('Still holds'), true);
+    assert.equal(viewed.releaseInfo, '1999');
+    assert.equal(viewed.name, 'The Matrix');
+    assert.match(viewed.background, /\/background\/medium\/tt0133093\/img$/);
+    assert.equal(viewed.description.includes('\n'), false);
 
     await update(token, (library) => actions.clearReview(library, 'tt0133093'));
     stored = await load(token);

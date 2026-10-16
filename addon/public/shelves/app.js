@@ -1334,6 +1334,7 @@
             title: data.title,
             year: data.year,
             poster: data.poster,
+            background: data.background || null,
             genres: data.genres || [],
             imdbRating: data.imdbRating,
             platforms: data.platforms || [],

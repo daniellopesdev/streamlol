@@ -101,6 +101,9 @@ function mergeStremio(library, items, metas = new Map()) {
                 title: (meta && meta.name) || item.title,
                 year: meta ? String(meta.releaseInfo || meta.year || '').slice(0, 4) : '',
                 poster: posterFor(item, meta),
+                background: (meta && typeof meta.background === 'string' && meta.background.startsWith('https://'))
+                    ? meta.background
+                    : null,
                 genres: (meta && (meta.genres || meta.genre)) || [],
                 imdbRating: (meta && meta.imdbRating) || null,
                 description: (meta && meta.description) || '',

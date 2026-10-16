@@ -2,24 +2,53 @@ const PAGE_SIZE = 100;
 
 const SORTS = ['added', 'title', 'year', 'imdb', 'score', 'recent'];
 
-function toMeta(film, review) {
-    const lines = [];
-    if (review) {
-        lines.push(`Your score: ${review.score}/10`);
-        if (review.note) lines.push(review.note);
+function displayTitle(film) {
+    let name = String(film.title || '').replace(/\s+/g, ' ').trim();
+    if (!name || name === film.imdbId) return film.imdbId;
+    // Scene-release names ("Movie.Name.1999.1080p…") read as gibberish on the Board.
+    if (/[._](?:19|20)\d{2}[._]/.test(name) && (name.includes('.') || name.includes('_'))) {
+        name = name.split(/[._](?:19|20)\d{2}[._]/)[0].replace(/[._]+/g, ' ').trim();
     }
-    if (film.platforms && film.platforms.length) lines.push(film.platforms.join(', '));
-    if (film.description) lines.push(film.description);
+    return name.slice(0, 120) || film.imdbId;
+}
+
+function releaseYear(film) {
+    const fromField = String(film.year || '').match(/(?:19|20)\d{2}/);
+    if (fromField) return fromField[0];
+    const fromTitle = String(film.title || '').match(/[._\s]((?:19|20)\d{2})[._\s]/);
+    return fromTitle ? fromTitle[1] : '';
+}
+
+function backdropFor(film) {
+    if (typeof film.background === 'string' && film.background.startsWith('https://')) return film.background;
+    if (/^tt\d+$/.test(film.imdbId || '')) {
+        return `https://images.metahub.space/background/medium/${film.imdbId}/img`;
+    }
+    return undefined;
+}
+
+function toMeta(film, review) {
+    const year = releaseYear(film);
+    const bits = [];
+    if (review) bits.push(`Your score: ${review.score}/10`);
+    if (review && review.note) bits.push(String(review.note).replace(/\s+/g, ' ').trim());
+    const plot = String(film.description || '').replace(/\s+/g, ' ').trim();
+    if (plot) bits.push(plot);
     return {
         id: film.imdbId,
         type: film.type === 'series' ? 'series' : 'movie',
-        name: film.title,
+        name: displayTitle(film),
         poster: film.poster || undefined,
         posterShape: 'poster',
-        year: film.year || undefined,
+        background: backdropFor(film),
+        logo: /^tt\d+$/.test(film.imdbId || '')
+            ? `https://images.metahub.space/logo/medium/${film.imdbId}/img`
+            : undefined,
+        year: year || undefined,
+        releaseInfo: year || undefined,
         imdbRating: film.imdbRating || undefined,
         genres: film.genres || [],
-        description: lines.join('\n') || undefined,
+        description: bits.join(' · ').slice(0, 300) || undefined,
     };
 }
 
