@@ -83,8 +83,8 @@ test('Discover reuses upstream data across users while applying each viewed filt
     bob.settings.tmdbToken = 'bob-token';
     bob.status.tt98765432 = 'viewed';
     const filters = { type: 'movie', country: 'PT', sort: 'popular', yearFrom: '2021' };
-    const first = await discover(alice, filters);
-    assert.equal(first.results.length, 1);
+    const first = await discover(bob, filters);
+    assert.equal(first.results.length, 0, 'a user with this title viewed warms the public cache');
     const coldCalls = fetch.mock.callCount();
     assert.ok(coldCalls <= 5);
     assert.equal(fetch.mock.calls.filter(({ arguments: [input] }) => {
@@ -94,5 +94,7 @@ test('Discover reuses upstream data across users while applying each viewed filt
     assert.equal((await discover(bob, filters)).results.length, 0);
     assert.equal(fetch.mock.callCount(), coldCalls);
     assert.equal((await discover(alice, filters)).results.length, 1);
+    assert.equal(fetch.mock.callCount(), coldCalls);
+    assert.equal((await discover(bob, { ...filters, hideViewed: false })).results.length, 1, 'viewed filtering must not be part of the shared cached result');
     assert.equal(fetch.mock.callCount(), coldCalls);
 });

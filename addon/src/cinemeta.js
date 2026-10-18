@@ -1,7 +1,7 @@
 const CINEMETA = 'https://v3-cinemeta.strem.io';
 const { cached, HOUR } = require('./cache');
 
-function cinemetaMeta(type, imdbId) {
+function cinemetaMeta(type, imdbId, { onError } = {}) {
     const kind = type === 'series' ? 'series' : 'movie';
     const key = `${kind}:${imdbId}`;
     return cached(`cinemeta:meta:${key}`, 6 * HOUR, () =>
@@ -11,11 +11,11 @@ function cinemetaMeta(type, imdbId) {
                 return response.json();
             })
             .then((payload) => payload.meta || null)
-    ).catch(() => null);
+    ).catch(() => { onError?.(); return null; });
 }
 
-async function imdbRating(imdbId, type = 'movie') {
-    const meta = await cinemetaMeta(type, imdbId);
+async function imdbRating(imdbId, type = 'movie', options) {
+    const meta = await cinemetaMeta(type, imdbId, options);
     return (meta && meta.imdbRating) || null;
 }
 

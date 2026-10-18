@@ -25,6 +25,7 @@ test('film saves keep the modal open and Discover searches survive selection and
     const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8').replace('/*__STREAMLOL_BOOT__*/', `window.__STREAMLOL__ = ${JSON.stringify(boot)};`);
     let releaseSlow;
     let releaseReference;
+    let enablePreload = false;
     await page.route('**/*', async (route) => {
         const request = route.request();
         const url = new URL(request.url());
@@ -49,7 +50,7 @@ test('film saves keep the modal open and Discover searches survive selection and
                 await new Promise((resolve) => { releaseSlow = resolve; });
                 return json({ results: [{ ...film, title: 'Stale movie' }] });
             }
-            return json({ results: [{ ...film, type: url.searchParams.get('type') || 'movie' }], nextCursor: null });
+            return json({ results: [{ ...film, imdbId: url.searchParams.get('cursor') ? 'tt2345678' : film.imdbId, type: url.searchParams.get('type') || 'movie' }], nextCursor: enablePreload && !url.searchParams.get('cursor') ? '2' : null });
         }
         if (endpoint.startsWith('/details/')) return json(film);
         if (endpoint.startsWith('/suggestions/')) return json({ rows: [] });
@@ -129,5 +130,13 @@ test('film saves keep the modal open and Discover searches survive selection and
     const referenceFinished = page.waitForResponse((response) => response.url().includes('/reference?') && response.url().includes('country=PT'));
     releaseReference();
     await referenceFinished;
+    enablePreload = true;
+    await input().fill('preload');
+    const nextPage = page.waitForResponse((response) => response.url().includes('q=preload') && response.url().includes('cursor=2'));
+    await input().press('Enter');
+    await nextPage;
+    await page.getByRole('button', { name: 'Load more', exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll('.card').length === 2);
+    assert.equal(requests.filter((item) => item.endpoint === '/discover' && item.params.q === 'preload').length, 2, 'Load more consumes the preload instead of requesting it again');
     assert.deepEqual(errors, []);
 });

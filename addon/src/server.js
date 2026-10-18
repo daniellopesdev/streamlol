@@ -14,6 +14,7 @@ const { appPage } = require('./appPage');
 const { TOKEN_RE, load, update, createToken, storageMode } = require('./store');
 const actions = require('./library');
 const { createLimiter } = require('./rateLimit');
+const { measureCache } = require('./cache');
 
 function readToken(raw) {
     if (TOKEN_RE.test(raw)) return raw;
@@ -118,6 +119,7 @@ function createApp() {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        res.setHeader('Access-Control-Expose-Headers', 'Server-Timing, X-Streamlol-Cache');
         res.setHeader('Cache-Control', 'no-store');
         if (req.method === 'OPTIONS') {
             res.sendStatus(204);
@@ -413,8 +415,13 @@ function createApp() {
                 hideViewed: req.query.hideViewed === undefined ? library.settings.hideViewed : req.query.hideViewed !== 'false',
                 country: req.query.country || library.settings.country,
             });
-            const result = await discover(library, filters, req.query.cursor || null, { signal: controller.signal });
-            if (!res.destroyed) res.json(result);
+            const { value, stats, durationMs } = await measureCache(() => discover(library, filters, req.query.cursor || null, { signal: controller.signal }));
+            if (!res.destroyed) {
+                const status = stats.errors ? 'degraded' : stats.misses ? 'miss' : stats.coalesced ? 'coalesced' : stats.memoryHits + stats.redisHits ? 'hit' : 'bypass';
+                res.setHeader('X-Streamlol-Cache', status);
+                res.setHeader('Server-Timing', `discover;dur=${durationMs}, metadata;desc="memory=${stats.memoryHits} redis=${stats.redisHits} misses=${stats.misses} writes=${stats.writes} errors=${stats.errors}"`);
+                res.json(value);
+            }
         } finally {
             res.off('close', cancel);
         }

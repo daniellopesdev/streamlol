@@ -2,6 +2,7 @@ const { tmdb, credentialFor } = require('./tmdb');
 const { imdbRating, cinemetaCatalog, filmFromMeta } = require('./cinemeta');
 const { collapseProviders, expandPlatformIds, brandNamesForIds } = require('./platforms');
 const { scopeLabel, scopeParams, scopePool, isPooled, movieOnly } = require('./scopes');
+const { cached, HOUR } = require('./cache');
 
 const CINEMETA_MAX_SKIP = 2000;
 const BASE_GENRES = [
@@ -104,22 +105,24 @@ async function mapPool(items, limit, worker, signal) {
 }
 
 async function tmdbReference(credential, region, type) {
-    const kind = tmdbKind(type);
-    const [genres, providers] = await Promise.all([
-        tmdb(credential, `/genre/${kind}/list`),
-        tmdb(credential, `/watch/providers/${kind}`, { watch_region: region }),
-    ]);
-    const value = {
-        tmdbGenres: genres.genres || [],
-        providers: collapseProviders(
-            (providers.results || []).map((item) => ({
-                id: item.provider_id,
-                name: item.provider_name,
-                priority: (item.display_priorities && item.display_priorities[region]) ?? item.display_priority ?? 999,
-            }))
-        ),
-    };
-    return value;
+    return cached(`discover:reference:v1:${type}:${region}`, 24 * HOUR, async () => {
+        const kind = tmdbKind(type);
+        const [genres, providers] = await Promise.all([
+            tmdb(credential, `/genre/${kind}/list`),
+            tmdb(credential, `/watch/providers/${kind}`, { watch_region: region }),
+        ]);
+        const value = {
+            tmdbGenres: genres.genres || [],
+            providers: collapseProviders(
+                (providers.results || []).map((item) => ({
+                    id: item.provider_id,
+                    name: item.provider_name,
+                    priority: (item.display_priorities && item.display_priorities[region]) ?? item.display_priority ?? 999,
+                }))
+            ),
+        };
+        return value;
+    });
 }
 
 async function reference(credential, country, type = 'movie') {
@@ -266,13 +269,13 @@ function enricher(credential, library, filters, ctx) {
     const { type, country } = filters;
     return async (item) => {
         ctx.signal?.throwIfAborted();
-        const facts = await tmdbFacts(credential, type, item.id).catch(() => null);
+        const facts = await tmdbFacts(credential, type, item.id).catch(() => { ctx.onError?.(); return null; });
         ctx.signal?.throwIfAborted();
         if (!facts || !facts.imdbId) return null;
         if (ctx.hideViewed && library.status[facts.imdbId] === 'viewed') return null;
         const available = providerIds(facts.providers, country);
         if (ctx.checkPlatforms && ctx.wantedPlatforms.length && !ctx.wantedPlatforms.some((id) => available.has(id))) return null;
-        const rating = await imdbRating(facts.imdbId, type);
+        const rating = await imdbRating(facts.imdbId, type, { onError: ctx.onError });
         if (filters.minImdb && !(Number(rating) >= Number(filters.minImdb))) return null;
         if (filters.sort === 'rating' && !filters.scope && !(Number(rating) > 0)) return null;
         return {
@@ -370,7 +373,37 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed, si
     const useTopRated = ratingCanUseTopRated(filters, wantedPlatforms);
     const titleSearch = filters.q && !scope;
     const today = new Date().toISOString().slice(0, 10);
-    const enrich = enricher(credential, library, filters, { ...ctx, checkPlatforms: titleSearch });
+    // Cache only public results. Viewed status is applied after reading each shared page.
+    const { hideViewed: ignored, ...publicFilters } = filters;
+    const publicContext = { ...ctx, hideViewed: false, checkPlatforms: titleSearch, signal: undefined };
+    async function sourcePage(pathname, params) {
+        signal?.throwIfAborted();
+        const key = `discover:page:v1:${JSON.stringify({ pathname, params, filters: publicFilters })}`;
+        const page = await cached(key, HOUR / 4, async () => {
+            let complete = true;
+            const enrich = enricher(credential, { status: {} }, filters, { ...publicContext, onError: () => { complete = false; } });
+            const payload = await tmdb(credential, pathname, params);
+            const candidates = (payload.results || []).filter((item) => {
+                if (!matchesLocal(item, idFilters)) return false;
+                if (scope && !titleMatches(item, filters.q)) return false;
+                const date = dateOf(item);
+                if (rating && !titleSearch && date && date > today) return false;
+                return true;
+            });
+            // An in-flight public page may have other subscribers; finish warming this page
+            // on disconnect, then let the cancelled caller stop before requesting another.
+            const films = await mapPool(candidates, ENRICH_CONCURRENCY, enrich);
+            return { results: films.filter(Boolean), totalPages: Math.min(payload.total_pages || params.page, 500), complete };
+        }, { cacheIf: (page) => page.complete });
+        signal?.throwIfAborted();
+        if (!page.complete && !page.results.length) {
+            throw Object.assign(new Error('Metadata providers are temporarily unavailable. Please retry.'), { status: 502, code: 'metadata_unavailable' });
+        }
+        return {
+            ...page,
+            results: page.results.filter((film) => !(hideViewed && library.status[film.imdbId] === 'viewed')),
+        };
+    }
 
     // Top rated: gather several TMDB pages, enrich to IMDb, sort, then page by offset.
     // Sorting only the current TMDB page left ratings non-sequential after IMDb remap.
@@ -385,18 +418,10 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed, si
         while (pool.length < gather && pagesUsed < pageBudget && page <= totalPages) {
             signal?.throwIfAborted();
             const payload = useTopRated
-                ? await tmdb(credential, `/${kind}/top_rated`, { page, language: 'en-US' })
-                : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
-            totalPages = Math.min(payload.total_pages || page, 500);
-            const candidates = (payload.results || []).filter((item) => {
-                if (!matchesLocal(item, idFilters)) return false;
-                if (scope && !titleMatches(item, filters.q)) return false;
-                const date = dateOf(item);
-                if (date && date > today) return false;
-                return true;
-            });
-            const enriched = await mapPool(candidates, ENRICH_CONCURRENCY, enrich, signal);
-            pool.push(...enriched.filter(Boolean));
+                ? await sourcePage(`/${kind}/top_rated`, { page, language: 'en-US' })
+                : await sourcePage(`/discover/${kind}`, tmdbParams(idFilters, page));
+            totalPages = payload.totalPages;
+            pool.push(...payload.results);
             pagesUsed += 1;
             page += 1;
         }
@@ -419,16 +444,10 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed, si
     while (results.length < PAGE_TARGET && pagesUsed < MAX_SOURCE_PAGES && page <= totalPages) {
         signal?.throwIfAborted();
         const payload = titleSearch
-            ? await tmdb(credential, `/search/${kind}`, { query: filters.q, page, include_adult: false })
-            : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
-        totalPages = Math.min(payload.total_pages || page, 500);
-        const candidates = (payload.results || []).filter((item) => {
-            if (!matchesLocal(item, idFilters)) return false;
-            if (scope && !titleMatches(item, filters.q)) return false;
-            return true;
-        });
-        const enriched = await mapPool(candidates, ENRICH_CONCURRENCY, enrich, signal);
-        results.push(...enriched.filter(Boolean));
+            ? await sourcePage(`/search/${kind}`, { query: filters.q, page, include_adult: false })
+            : await sourcePage(`/discover/${kind}`, tmdbParams(idFilters, page));
+        totalPages = payload.totalPages;
+        results.push(...payload.results);
         pagesUsed += 1;
         page += 1;
     }

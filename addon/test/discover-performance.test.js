@@ -4,6 +4,7 @@ const { setTimeout: delay } = require('node:timers/promises');
 const { performance } = require('node:perf_hooks');
 const { discover } = require('../src/discover');
 const { emptyLibrary } = require('../src/store');
+const { measureCache } = require('../src/cache');
 
 for (const sort of ['popular', 'rating']) {
     test(`filtered ${sort} discovery batches metadata without losing IMDb scores or provider data`, async (t) => {
@@ -62,10 +63,18 @@ for (const sort of ['popular', 'rating']) {
         }
         assert.equal(calls, referenceCalls + totalPages + totalPages * 20 * 2);
         assert.ok(peak <= 10);
+        const before = calls;
+        const warmStart = performance.now();
+        const warm = await measureCache(() => discover(library, { type: 'movie', country: 'US', sort, genres: ['Drama'], yearFrom: sort === 'rating' ? '2019' : '2018' }));
+        assert.deepEqual(warm.value, result);
+        assert.equal(calls, before);
+        assert.equal(warm.stats.misses, 0);
+        assert.equal(warm.stats.memoryHits, 1 + totalPages, 'read a reference bundle and complete pages, without per-film lookups');
+        t.diagnostic(`repeat: ${Math.round(performance.now() - warmStart)}ms, ${warm.stats.memoryHits} cache reads, zero upstream requests`);
     });
 }
 
-test('an aborted filter stops scheduling enrichment and later catalog pages', async (t) => {
+test('an aborted filter finishes its shareable page but requests no later catalog pages', async (t) => {
     const controller = new AbortController();
     let facts = 0;
     let ratings = 0;
@@ -92,7 +101,31 @@ test('an aborted filter stops scheduling enrichment and later catalog pages', as
     const library = emptyLibrary();
     library.settings.tmdbToken = 'mock-token';
     await assert.rejects(discover(library, { country: 'GB', sort: 'popular' }, null, { signal: controller.signal }), { name: 'AbortError' });
-    assert.equal(facts, 1);
+    assert.equal(facts, 20);
     assert.equal(pages, 1);
-    assert.equal(ratings, 0);
+    assert.equal(ratings, 1, 'all mocked films share one IMDb id, so the rating request coalesces');
+});
+
+test('failed rating enrichment is retried rather than persisting an empty filtered page', async (t) => {
+    let ratingCalls = 0;
+    t.mock.method(global, 'fetch', async (input) => {
+        const url = new URL(input);
+        if (url.hostname === 'v3-cinemeta.strem.io') {
+            ratingCalls += 1;
+            return ratingCalls === 1 ? new Response('', { status: 503 }) : Response.json({ meta: { imdbRating: '8.8' } });
+        }
+        if (url.pathname.includes('/genre/')) return Response.json({ genres: [] });
+        if (url.pathname.includes('/watch/providers/')) return Response.json({ results: [] });
+        if (url.pathname.includes('/search/')) return Response.json({ total_pages: 1, results: [{ id: 735000, title: 'Retry film' }] });
+        if (url.pathname === '/3/movie/735000') return Response.json({ external_ids: { imdb_id: 'tt735000' } });
+        throw new Error(`Unexpected request: ${url.pathname}`);
+    });
+    const library = emptyLibrary();
+    library.settings.tmdbToken = 'mock-token';
+    const filters = { country: 'FI', q: 'retry-cache-test', minImdb: '8' };
+    await assert.rejects(discover(library, filters), { status: 502, code: 'metadata_unavailable' });
+    assert.equal((await discover(library, filters)).results.length, 1);
+    assert.equal(ratingCalls, 2);
+    assert.equal((await discover(library, filters)).results.length, 1);
+    assert.equal(ratingCalls, 2);
 });

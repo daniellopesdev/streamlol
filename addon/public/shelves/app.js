@@ -166,7 +166,30 @@
 
     // ---------- data ----------
 
+    let preload = null;
+
+    function clearPreload() {
+        if (!preload) return;
+        clearTimeout(preload.timer);
+        preload.controller.abort();
+        preload = null;
+    }
+
+    function preloadNextPage(cursor) {
+        clearPreload();
+        if (!cursor || !state.results.length || state.filtersOpen || state.active.kind !== 'discover' || navigator.connection?.saveData) return;
+        const params = discoverParams();
+        params.set('cursor', cursor);
+        const next = { path: `/discover?${params}`, controller: new AbortController(), promise: null };
+        preload = next;
+        // Warm one page only, after the current results have been visible for a moment.
+        next.timer = setTimeout(() => {
+            next.promise = api(next.path, { signal: next.controller.signal }).catch(() => null);
+        }, 800);
+    }
+
     async function reload() {
+        clearPreload();
         state.library = await api('');
         boot.tmdb = state.library.settings.tmdb || null;
         return state.library;
@@ -201,7 +224,13 @@
     async function search(cursor = null) {
         clearTimeout(searchTimer);
         searchController?.abort();
-        const controller = new AbortController();
+        const params = discoverParams();
+        if (cursor) params.set('cursor', cursor);
+        const path = `/discover?${params}`;
+        const ready = preload?.path === path && preload.promise ? preload : null;
+        if (ready) preload = null;
+        else clearPreload();
+        const controller = ready?.controller || new AbortController();
         searchController = controller;
         const requestId = ++state.requestId;
         state.loading = true;
@@ -214,14 +243,13 @@
         }
         render();
         try {
-            const params = discoverParams();
-            if (cursor) params.set('cursor', cursor);
-            const payload = await api(`/discover?${params}`, { signal: controller.signal });
+            const payload = (ready && await ready.promise) || await api(path, { signal: controller.signal });
             if (requestId !== state.requestId) return;
             state.results = cursor ? [...state.results, ...payload.results] : payload.results;
             state.nextCursor = payload.nextCursor || null;
             state.notice = payload.notice || null;
             state.scopeInfo = payload.scope || null;
+            preloadNextPage(state.nextCursor);
         } catch (error) {
             if (requestId !== state.requestId) return;
             state.error = error.message;
@@ -238,6 +266,7 @@
     let searchController = null;
     function scheduleSearch() {
         clearTimeout(searchTimer);
+        clearPreload();
         searchController?.abort();
         state.requestId += 1;
         render();
@@ -246,6 +275,7 @@
 
     async function applyScope(scope, options = {}) {
         clearTimeout(searchTimer);
+        clearPreload();
         searchController?.abort();
         state.requestId += 1;
         state.commandQuery = '';
@@ -556,6 +586,7 @@
                 ? (state.active.kind === 'list' || state.listsOpen)
                 : state.active.kind === kind && !state.listsOpen;
             tabs.appendChild(button(label, `tab ${selected ? 'on' : ''}`, () => {
+                if (kind !== 'discover') clearPreload();
                 if (kind === 'lists') {
                     state.listsOpen = !state.listsOpen;
                     if (!state.listsOpen && state.active.kind === 'list') state.active = { kind: 'library' };
@@ -613,6 +644,7 @@
         if (hasTmdb()) loadReference().catch(() => {});
         if (state.active.kind === 'discover') await search();
         else {
+            clearPreload();
             searchController?.abort();
             state.requestId += 1;
             state.results = [];
@@ -674,6 +706,7 @@
         }
 
         input.oninput = () => {
+            clearPreload();
             clearTimeout(timer);
             const q = input.value.trim();
             state.commandQuery = input.value;
@@ -900,6 +933,7 @@
     }
 
     function openFilters() {
+        clearPreload();
         state.draft = drawerFields(state.filters);
         state.filtersOpen = true;
         render();

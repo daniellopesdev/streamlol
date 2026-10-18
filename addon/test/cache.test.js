@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createCache } = require('../src/cache');
+const { createCache, measureCache } = require('../src/cache');
 
 test('concurrent requests coalesce, payloads are isolated, TTL expires and memory is bounded', async () => {
     let clock = 0;
@@ -19,6 +19,37 @@ test('concurrent requests coalesce, payloads are isolated, TTL expires and memor
     await cached('third', 100, load);
     await cached('film', 100, load);
     assert.equal(calls, 5);
+});
+
+test('cache diagnostics distinguish persisted hits, writes, misses and Redis failures', async () => {
+    const data = new Map();
+    const remote = {
+        get: async (key) => data.get(key),
+        set: async (key, value) => data.set(key, value),
+    };
+    const first = createCache({ client: () => remote });
+    const cold = await measureCache(() => first('public-page', 10000, async () => ({ results: [1, 2] })));
+    assert.equal(cold.stats.misses, 1);
+    assert.equal(cold.stats.writes, 1);
+    const second = createCache({ client: () => remote });
+    const warm = await measureCache(() => second('public-page', 10000, async () => { throw new Error('Must not rebuild a persisted page'); }));
+    assert.equal(warm.stats.redisHits, 1);
+    assert.deepEqual(warm.value.results, [1, 2]);
+    const failed = createCache({ client: () => ({ get: async () => { throw new Error('offline'); } }) });
+    const degraded = await measureCache(() => failed('page', 10000, async () => 'fallback'));
+    assert.equal(degraded.stats.errors, 1);
+    assert.equal(degraded.stats.writes, 0);
+});
+
+test('incomplete pages are returned without being cached', async () => {
+    const cached = createCache({ client: () => null });
+    let calls = 0;
+    const load = async () => ({ complete: ++calls > 1 });
+    const options = { cacheIf: (page) => page.complete };
+    assert.equal((await cached('page', 10000, load, options)).complete, false);
+    assert.equal((await cached('page', 10000, load, options)).complete, true);
+    await cached('page', 10000, load, options);
+    assert.equal(calls, 2);
 });
 
 test('Redis shares metadata between instances and preserves the original expiry', async () => {
