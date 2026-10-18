@@ -402,13 +402,22 @@ function createApp() {
     }));
 
     app.get('/api/:token/discover', asyncRoute(async (req, res) => {
-        const library = req.library;
-        const filters = actions.cleanFilters({
-            ...req.query,
-            hideViewed: req.query.hideViewed === undefined ? library.settings.hideViewed : req.query.hideViewed !== 'false',
-            country: req.query.country || library.settings.country,
-        });
-        res.json(await discover(library, filters, req.query.cursor || null));
+        if (res.destroyed) return;
+        const controller = new AbortController();
+        const cancel = () => { if (!res.writableEnded) controller.abort(); };
+        res.on('close', cancel);
+        try {
+            const library = req.library;
+            const filters = actions.cleanFilters({
+                ...req.query,
+                hideViewed: req.query.hideViewed === undefined ? library.settings.hideViewed : req.query.hideViewed !== 'false',
+                country: req.query.country || library.settings.country,
+            });
+            const result = await discover(library, filters, req.query.cursor || null, { signal: controller.signal });
+            if (!res.destroyed) res.json(result);
+        } finally {
+            res.off('close', cancel);
+        }
     }));
 
     app.put('/api/:token/settings', asyncRoute(async (req, res) => {
@@ -493,6 +502,7 @@ function createApp() {
     }));
 
     app.use((error, req, res, next) => {
+        if (res.destroyed) return;
         if (res.headersSent) {
             next(error);
             return;

@@ -19,6 +19,8 @@ const TV_NOISE_GENRES = ['10763', '10766', '10767'];
 
 const PAGE_TARGET = 20;
 const MAX_SOURCE_PAGES = 6;
+// One combined TMDB request per worker keeps the previous peak of ten TMDB calls.
+const ENRICH_CONCURRENCY = 10;
 
 const COUNTRIES = [
     ['US', 'United States'],
@@ -86,11 +88,12 @@ function matchesFilm(film, filters) {
     return true;
 }
 
-async function mapPool(items, limit, worker) {
+async function mapPool(items, limit, worker, signal) {
     const results = new Array(items.length);
     let cursor = 0;
     async function run() {
         while (cursor < items.length) {
+            signal?.throwIfAborted();
             const index = cursor;
             cursor += 1;
             results[index] = await worker(items[index], index);
@@ -142,15 +145,15 @@ async function reference(credential, country, type = 'movie') {
     };
 }
 
-function tmdbFacts(credential, type, tmdbId) {
+async function tmdbFacts(credential, type, tmdbId) {
     const kind = tmdbKind(type);
-    return Promise.all([
-        tmdb(credential, `/${kind}/${tmdbId}/external_ids`),
-        tmdb(credential, `/${kind}/${tmdbId}/watch/providers`),
-    ]).then(([external, providers]) => ({
-        imdbId: external.imdb_id || null,
-        providers: providers.results || {},
-    }));
+    const info = await tmdb(credential, `/${kind}/${tmdbId}`, {
+        append_to_response: 'external_ids,watch/providers',
+    });
+    return {
+        imdbId: info.external_ids?.imdb_id || info.imdb_id || null,
+        providers: info['watch/providers']?.results || {},
+    };
 }
 
 function providerIds(providerMap, country) {
@@ -262,7 +265,9 @@ function sortPool(items, sort) {
 function enricher(credential, library, filters, ctx) {
     const { type, country } = filters;
     return async (item) => {
+        ctx.signal?.throwIfAborted();
         const facts = await tmdbFacts(credential, type, item.id).catch(() => null);
+        ctx.signal?.throwIfAborted();
         if (!facts || !facts.imdbId) return null;
         if (ctx.hideViewed && library.status[facts.imdbId] === 'viewed') return null;
         const available = providerIds(facts.providers, country);
@@ -312,7 +317,7 @@ async function pooledDiscover(credential, library, filters, idFilters, ctx, curs
         while (batch.length < window && cursorAt < candidates.length) {
             const slice = candidates.slice(cursorAt, cursorAt + 10);
             cursorAt += slice.length;
-            const enriched = await mapPool(slice, 5, enrich);
+            const enriched = await mapPool(slice, ENRICH_CONCURRENCY, enrich, ctx.signal);
             batch.push(...enriched.filter(Boolean));
         }
         batch.sort(byImdbDesc);
@@ -331,7 +336,7 @@ async function pooledDiscover(credential, library, filters, idFilters, ctx, curs
     while (results.length < PAGE_TARGET && offset < candidates.length && offset < budget) {
         const slice = candidates.slice(offset, offset + 10);
         offset += slice.length;
-        const enriched = await mapPool(slice, 5, enrich);
+        const enriched = await mapPool(slice, ENRICH_CONCURRENCY, enrich, ctx.signal);
         results.push(...enriched.filter(Boolean));
     }
     return {
@@ -342,13 +347,14 @@ async function pooledDiscover(credential, library, filters, idFilters, ctx, curs
     };
 }
 
-async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
+async function tmdbDiscover(credential, library, filters, cursor, hideViewed, signal) {
     const { country, type, scope } = filters;
     const kind = tmdbKind(type);
     if (scope && movieOnly(scope) && type === 'series') {
         return { source: 'tmdb', results: [], nextCursor: null, notice: `${scope.name} only has movies. Switch to Movies.` };
     }
     const ref = await tmdbReference(credential, country, type);
+    signal?.throwIfAborted();
     const genreNames = new Map(ref.tmdbGenres.map((genre) => [String(genre.id), genre.name]));
     const wantedPlatforms = expandPlatformIds(filters.platforms, ref.providers);
     const idFilters = {
@@ -357,7 +363,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
         excludeGenres: tmdbGenreIds(filters.excludeGenres, ref.tmdbGenres),
         platforms: wantedPlatforms,
     };
-    const ctx = { ref, genreNames, wantedPlatforms, hideViewed };
+    const ctx = { ref, genreNames, wantedPlatforms, hideViewed, signal };
     if (isPooled(scope)) return pooledDiscover(credential, library, filters, idFilters, ctx, cursor);
 
     const rating = filters.sort === 'rating';
@@ -377,6 +383,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
         let pagesUsed = 0;
         const pageBudget = MAX_SOURCE_PAGES * 3;
         while (pool.length < gather && pagesUsed < pageBudget && page <= totalPages) {
+            signal?.throwIfAborted();
             const payload = useTopRated
                 ? await tmdb(credential, `/${kind}/top_rated`, { page, language: 'en-US' })
                 : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
@@ -388,7 +395,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
                 if (date && date > today) return false;
                 return true;
             });
-            const enriched = await mapPool(candidates, 5, enrich);
+            const enriched = await mapPool(candidates, ENRICH_CONCURRENCY, enrich, signal);
             pool.push(...enriched.filter(Boolean));
             pagesUsed += 1;
             page += 1;
@@ -410,6 +417,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
     let pagesUsed = 0;
 
     while (results.length < PAGE_TARGET && pagesUsed < MAX_SOURCE_PAGES && page <= totalPages) {
+        signal?.throwIfAborted();
         const payload = titleSearch
             ? await tmdb(credential, `/search/${kind}`, { query: filters.q, page, include_adult: false })
             : await tmdb(credential, `/discover/${kind}`, tmdbParams(idFilters, page));
@@ -419,7 +427,7 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed) {
             if (scope && !titleMatches(item, filters.q)) return false;
             return true;
         });
-        const enriched = await mapPool(candidates, 5, enrich);
+        const enriched = await mapPool(candidates, ENRICH_CONCURRENCY, enrich, signal);
         results.push(...enriched.filter(Boolean));
         pagesUsed += 1;
         page += 1;
@@ -473,7 +481,7 @@ function decodeCursor(cursor) {
     }
 }
 
-async function cinemetaDiscover(library, filters, cursor, hideViewed) {
+async function cinemetaDiscover(library, filters, cursor, hideViewed, signal) {
     let state = (cursor && decodeCursor(cursor)) || cinemetaStart(filters);
     const results = [];
     const seen = new Set();
@@ -484,6 +492,7 @@ async function cinemetaDiscover(library, filters, cursor, hideViewed) {
     const target = rankByImdb ? PAGE_TARGET * 3 : PAGE_TARGET;
 
     while (state && results.length < target && pagesUsed < pageBudget) {
+        signal?.throwIfAborted();
         const metas = await cinemetaCatalog(filters.type, state.catalog, {
             genre: state.genre,
             search: state.search,
@@ -500,7 +509,7 @@ async function cinemetaDiscover(library, filters, cursor, hideViewed) {
         if (filters.minImdb || rankByImdb) {
             await mapPool(films.filter((film) => !film.imdbRating), 5, async (film) => {
                 film.imdbRating = await imdbRating(film.imdbId, filters.type);
-            });
+            }, signal);
         }
         results.push(...films.filter((film) => matchesFilm(film, filters)));
         state = cinemetaNext(state, metas.length, filters);
@@ -519,7 +528,8 @@ async function cinemetaDiscover(library, filters, cursor, hideViewed) {
     return { source: 'cinemeta', results, nextCursor: encodeCursor(state), notice: notices.join(' ') || null };
 }
 
-async function discover(library, filters, cursor) {
+async function discover(library, filters, cursor, { signal } = {}) {
+    signal?.throwIfAborted();
     const credential = credentialFor(library);
     const country = /^[A-Z]{2}$/.test(filters.country || '') ? filters.country : (library.settings.country || 'US');
     const hideViewed = filters.hideViewed !== false && filters.hideViewed !== 'false';
@@ -533,14 +543,14 @@ async function discover(library, filters, cursor) {
         platforms: asList(filters.platforms),
         scope: filters.scope || null,
     };
-    if (credential) return tmdbDiscover(credential, library, normalized, cursor, hideViewed);
+    if (credential) return tmdbDiscover(credential, library, normalized, cursor, hideViewed, signal);
     if (normalized.scope) {
         const error = new Error('People, collections and company search need a TMDB token.');
         error.status = 412;
         error.code = 'tmdb_missing';
         throw error;
     }
-    return cinemetaDiscover(library, normalized, cursor, hideViewed);
+    return cinemetaDiscover(library, normalized, cursor, hideViewed, signal);
 }
 
 module.exports = {

@@ -65,6 +65,7 @@
     async function api(path, options = {}) {
         const response = await fetch(`${boot.apiBase}${path}`, {
             method: options.method || 'GET',
+            signal: options.signal,
             headers: { 'Content-Type': 'application/json' },
             body: options.body === undefined ? undefined : JSON.stringify(options.body),
         });
@@ -171,10 +172,10 @@
         return state.library;
     }
 
-    async function loadReference(country = state.filters.country || state.library?.settings?.country || 'US') {
+    async function loadReference(country = state.draft?.country || state.filters.country || state.library?.settings?.country || 'US') {
         const type = state.type;
         const reference = await api(`/reference?country=${encodeURIComponent(country)}&type=${type}`);
-        if (type === state.type && country === (state.filters.country || state.library?.settings?.country || 'US')) state.reference = reference;
+        if (type === state.type && country === (state.draft?.country || state.filters.country || state.library?.settings?.country || 'US')) state.reference = reference;
     }
 
     function discoverParams() {
@@ -199,6 +200,9 @@
 
     async function search(cursor = null) {
         clearTimeout(searchTimer);
+        searchController?.abort();
+        const controller = new AbortController();
+        searchController = controller;
         const requestId = ++state.requestId;
         state.loading = true;
         state.error = '';
@@ -212,7 +216,7 @@
         try {
             const params = discoverParams();
             if (cursor) params.set('cursor', cursor);
-            const payload = await api(`/discover?${params}`);
+            const payload = await api(`/discover?${params}`, { signal: controller.signal });
             if (requestId !== state.requestId) return;
             state.results = cursor ? [...state.results, ...payload.results] : payload.results;
             state.nextCursor = payload.nextCursor || null;
@@ -231,8 +235,10 @@
     }
 
     let searchTimer = null;
+    let searchController = null;
     function scheduleSearch() {
         clearTimeout(searchTimer);
+        searchController?.abort();
         state.requestId += 1;
         render();
         searchTimer = setTimeout(() => search(), 380);
@@ -240,6 +246,7 @@
 
     async function applyScope(scope, options = {}) {
         clearTimeout(searchTimer);
+        searchController?.abort();
         state.requestId += 1;
         state.commandQuery = '';
         const keep = {
@@ -606,6 +613,7 @@
         if (hasTmdb()) loadReference().catch(() => {});
         if (state.active.kind === 'discover') await search();
         else {
+            searchController?.abort();
             state.requestId += 1;
             state.results = [];
             state.nextCursor = null;
@@ -899,13 +907,11 @@
 
     async function closeFilters() {
         const changed = state.draft && draftChanged();
-        const countryChanged = changed && state.draft.country !== state.filters.country;
         if (changed) Object.assign(state.filters, state.draft);
         state.draft = null;
         state.filtersOpen = false;
         if (!changed) return render();
-        if (countryChanged) await loadReference().catch(() => {});
-        scheduleSearch();
+        await search();
     }
 
     function filterDrawer() {

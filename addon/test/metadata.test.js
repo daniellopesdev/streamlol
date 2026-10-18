@@ -74,8 +74,7 @@ test('Discover reuses upstream data across users while applying each viewed filt
         if (url.pathname.includes('/discover/')) return Response.json({
             total_pages: 1, results: [{ id: 98765, title: 'Shared film' }],
         });
-        if (url.pathname.endsWith('/external_ids')) return Response.json({ imdb_id: 'tt98765432' });
-        if (url.pathname.endsWith('/watch/providers')) return Response.json({ results: {} });
+        if (url.pathname === '/3/movie/98765') return Response.json({ external_ids: { imdb_id: 'tt98765432' }, 'watch/providers': { results: {} } });
         throw new Error(`Unexpected request: ${url.pathname}`);
     });
     const alice = emptyLibrary();
@@ -87,7 +86,11 @@ test('Discover reuses upstream data across users while applying each viewed filt
     const first = await discover(alice, filters);
     assert.equal(first.results.length, 1);
     const coldCalls = fetch.mock.callCount();
-    assert.equal(coldCalls, 6);
+    assert.ok(coldCalls <= 5);
+    assert.equal(fetch.mock.calls.filter(({ arguments: [input] }) => {
+        const url = new URL(input);
+        return url.hostname === 'v3-cinemeta.strem.io' || url.pathname.includes('/discover/') || url.pathname === '/3/movie/98765';
+    }).length, 3);
     assert.equal((await discover(bob, filters)).results.length, 0);
     assert.equal(fetch.mock.callCount(), coldCalls);
     assert.equal((await discover(alice, filters)).results.length, 1);

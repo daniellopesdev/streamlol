@@ -24,6 +24,7 @@ test('film saves keep the modal open and Discover searches survive selection and
     const boot = { token, origin, apiBase: `${origin}/api/${token}`, tmdb: 'user', ads: {}, manifestUrl: `${origin}/${token}/manifest.json` };
     const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8').replace('/*__STREAMLOL_BOOT__*/', `window.__STREAMLOL__ = ${JSON.stringify(boot)};`);
     let releaseSlow;
+    let releaseReference;
     await page.route('**/*', async (route) => {
         const request = route.request();
         const url = new URL(request.url());
@@ -38,7 +39,10 @@ test('film saves keep the modal open and Discover searches survive selection and
         const json = (payload) => route.fulfill({ json: payload });
         if (!endpoint) return json(library);
         if (endpoint === '/stremio/device') return json({ saved: false });
-        if (endpoint === '/reference') return json({ countries: [], genres: [], providers: [] });
+        if (endpoint === '/reference') {
+            if (url.searchParams.get('country') === 'PT') await new Promise((resolve) => { releaseReference = resolve; });
+            return json({ countries: [{ code: 'US', name: 'United States' }, { code: 'PT', name: 'Portugal' }], genres: [], providers: [] });
+        }
         if (endpoint === '/search') return json({ people: [{ kind: 'person', id: '12', name: 'Test Person', role: 'cast', department: 'Acting', knownFor: [] }] });
         if (endpoint === '/discover') {
             if (url.searchParams.get('q') === 'slow' && url.searchParams.get('type') === 'movie') {
@@ -107,11 +111,23 @@ test('film saves keep the modal open and Discover searches survive selection and
     const slowRequest = page.waitForRequest((request) => new URL(request.url()).searchParams.get('q') === 'slow' && request.url().includes('/discover?'));
     await input().press('Enter');
     await slowRequest;
+    const cancelled = page.waitForEvent('requestfailed', { predicate: (request) => request.url().includes('type=movie') && request.url().includes('q=slow') });
     await page.getByRole('button', { name: 'Series', exact: true }).click();
     await page.locator('.card').first().waitFor();
-    const slowResponse = page.waitForResponse((response) => response.url().includes('type=movie') && response.url().includes('q=slow'));
+    await cancelled;
     releaseSlow();
-    await slowResponse;
     assert.equal(await page.locator('.card-title').first().textContent(), 'Test title');
+    await page.getByRole('button', { name: 'Filters', exact: true }).click();
+    const referenceRequested = page.waitForRequest((request) => request.url().includes('/reference?') && request.url().includes('country=PT'));
+    await page.locator('.where select').selectOption('PT');
+    await referenceRequested;
+    const filtered = page.waitForRequest((request) => request.url().includes('/discover?') && request.url().includes('country=PT'));
+    await page.getByRole('button', { name: 'Done', exact: true }).click();
+    await filtered;
+    await page.locator('.card').first().waitFor();
+    assert.equal(requests.filter((item) => item.endpoint === '/reference' && item.params.country === 'PT').length, 1);
+    const referenceFinished = page.waitForResponse((response) => response.url().includes('/reference?') && response.url().includes('country=PT'));
+    releaseReference();
+    await referenceFinished;
     assert.deepEqual(errors, []);
 });
