@@ -43,6 +43,7 @@
         error: '',
         stack: [],
         requestId: 0,
+        commandQuery: '',
     };
 
     const view = document.getElementById('view');
@@ -171,7 +172,9 @@
     }
 
     async function loadReference(country = state.filters.country || state.library?.settings?.country || 'US') {
-        state.reference = await api(`/reference?country=${encodeURIComponent(country)}&type=${state.type}`);
+        const type = state.type;
+        const reference = await api(`/reference?country=${encodeURIComponent(country)}&type=${type}`);
+        if (type === state.type && country === (state.filters.country || state.library?.settings?.country || 'US')) state.reference = reference;
     }
 
     function discoverParams() {
@@ -195,10 +198,16 @@
     }
 
     async function search(cursor = null) {
+        clearTimeout(searchTimer);
         const requestId = ++state.requestId;
         state.loading = true;
         state.error = '';
-        if (!cursor) state.results = [];
+        if (!cursor) {
+            state.results = [];
+            state.nextCursor = null;
+            state.scopeInfo = null;
+            state.notice = null;
+        }
         render();
         try {
             const params = discoverParams();
@@ -224,11 +233,15 @@
     let searchTimer = null;
     function scheduleSearch() {
         clearTimeout(searchTimer);
+        state.requestId += 1;
         render();
         searchTimer = setTimeout(() => search(), 380);
     }
 
     async function applyScope(scope, options = {}) {
+        clearTimeout(searchTimer);
+        state.requestId += 1;
+        state.commandQuery = '';
         const keep = {
             country: state.filters.country,
             hideViewed: state.filters.hideViewed,
@@ -562,15 +575,7 @@
         view.innerHTML = '';
 
         const head = el('<div class="head"></div>');
-        head.appendChild(segmented([['movie', 'Movies'], ['series', 'Series']], state.type, async (id) => {
-            if (id === state.type) return;
-            state.type = id;
-            state.filters = { ...state.filters, genres: [], excludeGenres: [], platforms: [] };
-            if (state.filters.sort === 'list' && !scopeHasOrder(state.filters.scope)) state.filters.sort = 'popular';
-            if (hasTmdb()) await loadReference().catch(() => {});
-            if (state.active.kind === 'discover') await search();
-            else render();
-        }));
+        head.appendChild(segmented([['movie', 'Movies'], ['series', 'Series']], state.type, switchType));
         view.appendChild(head);
 
         if (state.listsOpen) {
@@ -589,6 +594,34 @@
 
     // ---------- command search ----------
 
+    async function switchType(type) {
+        if (type === state.type) return;
+        state.type = type;
+        state.filters = { ...state.filters, genres: [], excludeGenres: [], platforms: [] };
+        if (state.commandQuery.trim() !== state.filters.q) {
+            state.filters.q = state.commandQuery.trim();
+            state.filters.scope = null;
+        }
+        if (state.filters.sort === 'list' && !scopeHasOrder(state.filters.scope)) state.filters.sort = 'popular';
+        if (hasTmdb()) loadReference().catch(() => {});
+        if (state.active.kind === 'discover') await search();
+        else {
+            state.requestId += 1;
+            state.results = [];
+            state.nextCursor = null;
+            state.loading = false;
+            render();
+        }
+    }
+
+    function titleSearch(query) {
+        state.commandQuery = query.trim();
+        state.filters.q = state.commandQuery;
+        state.filters.scope = null;
+        if (state.filters.sort === 'list') state.filters.sort = 'popular';
+        return search();
+    }
+
     function commandBar() {
         const wrap = el(`
           <div class="command">
@@ -601,38 +634,44 @@
         `);
         const input = wrap.querySelector('input');
         const panel = wrap.querySelector('.suggest-panel');
-        input.value = state.filters.q || '';
+        input.value = state.commandQuery;
         let timer = null;
-        let lastQuery = '';
+        let lookupId = 0;
 
-        const close = () => { panel.hidden = true; };
-        const runTitleSearch = () => {
+        const close = () => { clearTimeout(timer); lookupId += 1; panel.hidden = true; };
+        const runTitleSearch = (query = input.value) => {
             close();
-            state.filters.q = input.value.trim();
-            search();
+            titleSearch(typeof query === 'string' ? query : input.value);
         };
 
         const focusables = () => [...panel.querySelectorAll('button')];
 
         async function lookup(q) {
-            lastQuery = q;
+            const id = ++lookupId;
+            const type = state.type;
             if (q.length < 2) { close(); return; }
             panel.hidden = false;
             panel.innerHTML = '<div class="sp-loading">Searching…</div>';
             let found;
             try {
-                found = await api(`/search?q=${encodeURIComponent(q)}&type=${state.type}`);
+                found = await api(`/search?q=${encodeURIComponent(q)}&type=${type}`);
             } catch (error) {
-                if (lastQuery === q) panel.innerHTML = `<div class="sp-loading">${escapeHtml(error.message)}</div>`;
+                if (id === lookupId && wrap.isConnected && type === state.type) {
+                    renderSuggestPanel(panel, q, {}, runTitleSearch);
+                }
                 return;
             }
-            if (lastQuery !== q) return;
+            if (id !== lookupId || !wrap.isConnected || type !== state.type) return;
             renderSuggestPanel(panel, q, found, runTitleSearch);
         }
 
         input.oninput = () => {
             clearTimeout(timer);
             const q = input.value.trim();
+            state.commandQuery = input.value;
+            lookupId += 1;
+            panel.hidden = true;
+            panel.innerHTML = '';
             timer = setTimeout(() => lookup(q), 260);
         };
         input.onkeydown = (event) => {
@@ -669,7 +708,7 @@
             <span class="sp-text"><b>Titles matching “${escapeHtml(q)}”</b><small>${state.type === 'series' ? 'Series' : 'Movies'} · press Enter</small></span>
           </button>
         `);
-        titleRow.onclick = runTitleSearch;
+        titleRow.onclick = () => runTitleSearch(q);
         panel.appendChild(titleRow);
 
         const group = (label, items, renderItem) => {
@@ -703,6 +742,7 @@
               </div>
             `);
             const actions = node.querySelector('.sp-actions');
+            node.querySelector('.sp-text').onclick = () => applyScope({ kind: 'person', id: person.id, name: person.name, role: person.role });
             const crew = button(crewLabel, `mini ${directing ? 'primary' : ''}`, () => applyScope({ kind: 'person', id: person.id, name: person.name, role: 'crew' }));
             const cast = button('Starring', `mini ${directing ? '' : 'primary'}`, () => applyScope({ kind: 'person', id: person.id, name: person.name, role: 'cast' }));
             if (directing) actions.append(crew, cast);
@@ -802,6 +842,7 @@
             });
             row.appendChild(button('Reset', 'chip ghost', () => {
                 state.filters = blankFilters({ country: f.country, scope: f.scope, sort: f.sort });
+                state.commandQuery = '';
                 scheduleSearch();
             }));
             view.appendChild(row);
@@ -1319,14 +1360,6 @@
         if (data.description) modal.querySelector('.hero-main').appendChild(el(`<p class="hero-desc">${escapeHtml(data.description)}</p>`));
 
         const actions = modal.querySelector('#film-actions');
-        actions.innerHTML = '';
-        if (state.stack.length > 1) {
-            actions.appendChild(button('← Back', 'btn ghost', async () => { state.stack.pop(); await showFilmModal(); }));
-        }
-        const open = el('<a class="btn primary" target="_blank" rel="noopener">▶ Open in Stremio</a>');
-        open.href = `stremio:///detail/${type}/${data.imdbId}`;
-        actions.appendChild(open);
-
         const payload = {
             imdbId: data.imdbId,
             type,
@@ -1339,35 +1372,54 @@
             platforms: data.platforms || [],
             description: data.description || '',
         };
-        const refresh = async () => { await reload(); await showFilmModal(); render(); };
-        const stored = state.library.films[data.imdbId];
-        const status = state.library.status[data.imdbId];
+        const refresh = async () => {
+            await reload();
+            if (modalRoot.contains(modal)) {
+                renderActions();
+                renderScores();
+                renderLists();
+            }
+            render();
+        };
         const label = filmLabel(data);
-        if (!stored) {
-            actions.appendChild(button('+ Library', 'btn', async () => {
-                await api('/films', { method: 'POST', body: { ...payload, status: 'library' } });
-                toast(`Added “${label}” to Library`);
-                await refresh();
-            }));
-            actions.appendChild(button('✓ Mark viewed', 'btn', async () => {
-                await api('/films', { method: 'POST', body: { ...payload, status: 'viewed' } });
-                toast(`Marked “${label}” as viewed`);
-                await refresh();
-            }));
-        } else {
-            actions.appendChild(button(status === 'viewed' ? '✓ Viewed' : '✓ Mark viewed', `btn ${status === 'viewed' ? 'on' : ''}`, async () => {
-                const next = status === 'viewed' ? 'library' : 'viewed';
-                await api(`/films/${data.imdbId}/status`, { method: 'POST', body: { status: next } });
-                toast(next === 'viewed' ? `Marked “${label}” as viewed` : `“${label}” back in Library`);
-                await refresh();
-            }));
-            actions.appendChild(button('Remove', 'btn ghost danger', async () => {
-                if (!window.confirm(`Remove “${label}” from your library?`)) return;
-                await api(`/films/${data.imdbId}`, { method: 'DELETE' });
-                toast(`Removed “${label}”`);
-                await refresh();
-            }));
+        function renderActions() {
+            actions.innerHTML = '';
+            if (state.stack.length > 1) {
+                actions.appendChild(button('← Back', 'btn ghost', async () => { state.stack.pop(); await showFilmModal(); }));
+            }
+            const open = el('<a class="btn primary" target="_blank" rel="noopener">▶ Open in Stremio</a>');
+            open.href = `stremio:///detail/${type}/${data.imdbId}`;
+            actions.appendChild(open);
+            const stored = state.library.films[data.imdbId];
+            const status = state.library.status[data.imdbId];
+            if (!stored) {
+                actions.appendChild(button('+ Library', 'btn', async () => {
+                    await api('/films', { method: 'POST', body: { ...payload, status: 'library' } });
+                    toast(`Added “${label}” to Library`);
+                    await refresh();
+                }));
+                actions.appendChild(button('✓ Mark viewed', 'btn', async () => {
+                    await api('/films', { method: 'POST', body: { ...payload, status: 'viewed' } });
+                    toast(`Marked “${label}” as viewed`);
+                    await refresh();
+                }));
+            } else {
+                actions.appendChild(button(status === 'viewed' ? '✓ Viewed' : '✓ Mark viewed', `btn ${status === 'viewed' ? 'on' : ''}`, async () => {
+                    const next = status === 'viewed' ? 'library' : 'viewed';
+                    await api(`/films/${data.imdbId}/status`, { method: 'POST', body: { status: next } });
+                    toast(next === 'viewed' ? `Marked “${label}” as viewed` : `“${label}” back in Library`);
+                    await refresh();
+                }));
+                actions.appendChild(button('Remove', 'btn ghost danger', async () => {
+                    if (!window.confirm(`Remove “${label}” from your library?`)) return;
+                    await api(`/films/${data.imdbId}`, { method: 'DELETE' });
+                    toast(`Removed “${label}”`);
+                    await refresh();
+                }));
+            }
+
         }
+        renderActions();
 
         const body = modal.querySelector('#film-body');
         body.innerHTML = '';
@@ -1395,34 +1447,42 @@
 
         const scoreBox = el('<div class="section"><h3>Your score</h3><div class="scores"></div></div>');
         const scores = scoreBox.querySelector('.scores');
-        const review = state.library.reviews[data.imdbId];
-        for (let score = 1; score <= 10; score += 1) {
-            scores.appendChild(button(String(score), `score ${review && Math.round(review.score) === score ? 'on' : ''}`, async () => {
-                if (!state.library.films[data.imdbId]) await api('/films', { method: 'POST', body: payload });
-                await api(`/films/${data.imdbId}/review`, { method: 'POST', body: { score, note: review?.note || '' } });
-                toast(`Rated “${label}” ${score}/10`);
-                await refresh();
-            }));
+        function renderScores() {
+            scores.innerHTML = '';
+            const review = state.library.reviews[data.imdbId];
+            for (let score = 1; score <= 10; score += 1) {
+                scores.appendChild(button(String(score), `score ${review && Math.round(review.score) === score ? 'on' : ''}`, async () => {
+                    if (!state.library.films[data.imdbId]) await api('/films', { method: 'POST', body: payload });
+                    await api(`/films/${data.imdbId}/review`, { method: 'POST', body: { score, note: review?.note || '' } });
+                    toast(`Rated “${label}” ${score}/10`);
+                    await refresh();
+                }));
+            }
         }
+        renderScores();
         body.appendChild(scoreBox);
 
         const lists = el('<div class="section"><h3>Lists</h3><div class="chips"></div></div>');
         const listRow = lists.querySelector('.chips');
-        (state.library.lists || []).forEach((list) => {
-            const inList = list.filmIds.includes(data.imdbId);
-            listRow.appendChild(button(`${inList ? '✓ ' : '+ '}${escapeHtml(list.name)}`, `chip ${inList ? 'on' : ''}`, async () => {
-                if (!state.library.films[data.imdbId]) await api('/films', { method: 'POST', body: payload });
-                if (inList) {
-                    await api(`/lists/${list.id}/films/${data.imdbId}`, { method: 'DELETE' });
-                    toast(`Removed “${label}” from ${list.name}`);
-                } else {
-                    await api(`/lists/${list.id}/films`, { method: 'POST', body: { imdbId: data.imdbId, film: payload } });
-                    toast(`Added “${label}” to ${list.name}`);
-                }
-                await refresh();
-            }));
-        });
-        listRow.appendChild(button('+ New list', 'chip add', () => createList(payload)));
+        function renderLists() {
+            listRow.innerHTML = '';
+            (state.library.lists || []).forEach((list) => {
+                const inList = list.filmIds.includes(data.imdbId);
+                listRow.appendChild(button(`${inList ? '✓ ' : '+ '}${escapeHtml(list.name)}`, `chip ${inList ? 'on' : ''}`, async () => {
+                    if (!state.library.films[data.imdbId]) await api('/films', { method: 'POST', body: payload });
+                    if (inList) {
+                        await api(`/lists/${list.id}/films/${data.imdbId}`, { method: 'DELETE' });
+                        toast(`Removed “${label}” from ${list.name}`);
+                    } else {
+                        await api(`/lists/${list.id}/films`, { method: 'POST', body: { imdbId: data.imdbId, film: payload } });
+                        toast(`Added “${label}” to ${list.name}`);
+                    }
+                    await refresh();
+                }));
+            });
+            listRow.appendChild(button('+ New list', 'chip add', () => createList(payload)));
+        }
+        renderLists();
         body.appendChild(lists);
 
         renderSuggestions(body, rows, type);
