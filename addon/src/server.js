@@ -13,6 +13,7 @@ const { configurePage } = require('./configurePage');
 const { appPage } = require('./appPage');
 const { TOKEN_RE, load, update, createToken, storageMode } = require('./store');
 const actions = require('./library');
+const { createLimiter } = require('./rateLimit');
 
 function readToken(raw) {
     if (TOKEN_RE.test(raw)) return raw;
@@ -34,11 +35,15 @@ const STREMIO_KEY = 'streamlol_stremio';
 function readCookie(req, name) {
     const header = req.get('cookie') || '';
     const match = header.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name}=`));
-    return match ? decodeURIComponent(match.slice(name.length + 1)) : '';
+    try {
+        return match ? decodeURIComponent(match.slice(name.length + 1)) : '';
+    } catch {
+        return '';
+    }
 }
 
 function secureFlag(req) {
-    return (req.get('x-forwarded-proto') || req.protocol || '').startsWith('https') ? '; Secure' : '';
+    return req.secure ? '; Secure' : '';
 }
 
 function rememberedToken(req) {
@@ -47,7 +52,7 @@ function rememberedToken(req) {
 }
 
 function rememberToken(req, res, token) {
-    res.append('Set-Cookie', `${TOKEN_KEY}=${token}; Max-Age=${ONE_YEAR_S}; Path=/; SameSite=Lax${secureFlag(req)}`);
+    res.append('Set-Cookie', `${TOKEN_KEY}=${token}; Max-Age=${ONE_YEAR_S}; Path=/; HttpOnly; SameSite=Lax${secureFlag(req)}`);
 }
 
 // The Stremio session key stays on the device that signed in (HttpOnly), so other
@@ -72,7 +77,7 @@ function forgetStremio(req, res) {
 
 function asyncRoute(handler) {
     return (req, res, next) => {
-        Promise.resolve(handler(req, res)).catch(next);
+        Promise.resolve().then(() => handler(req, res, next)).catch(next);
     };
 }
 
@@ -85,17 +90,31 @@ function publicLibrary(library) {
     };
 }
 
+function publicOrigin(req) {
+    try {
+        const url = new URL(`${req.secure ? 'https' : 'http'}://${req.get('host')}`);
+        if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Invalid host');
+        return url.origin;
+    } catch {
+        throw Object.assign(new Error('Invalid request host'), { status: 400 });
+    }
+}
+
 function publicUrl(req, token, suffix) {
-    const host = req.get('host');
-    const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
-    return `${proto}://${host}/${token}/${suffix}`;
+    return `${publicOrigin(req)}/${token}/${suffix}`;
 }
 
 function createApp() {
     const app = express();
-    app.set('trust proxy', true);
-    app.use(express.json({ limit: '1mb' }));
+    const limit = createLimiter();
+    app.disable('x-powered-by');
+    // Trust the nearest reverse proxy, rather than arbitrary client-supplied proxy hops.
+    app.set('trust proxy', 1);
     app.use((req, res, next) => {
+        res.setHeader('Referrer-Policy', 'no-referrer');
+        res.setHeader('X-Content-Type-Options', 'nosniff');
+        res.setHeader('X-Frame-Options', 'DENY');
+        res.setHeader('Content-Security-Policy', "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'");
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
@@ -106,6 +125,7 @@ function createApp() {
         }
         next();
     });
+    app.use(express.json({ limit: '1mb' }));
 
     app.use('/shelves', express.static(path.join(__dirname, '..', 'public', 'shelves'), {
         fallthrough: true,
@@ -129,25 +149,23 @@ function createApp() {
         });
     });
 
-    app.get('/configure', (req, res) => {
+    app.get('/configure', asyncRoute(async (req, res) => {
         const saved = req.query.new ? null : rememberedToken(req);
         if (saved) {
             res.redirect(`/${saved}/`);
             return;
         }
+        await limit(req, res, 'create', 20, 60 * 60 * 1000);
         const token = createToken();
-        update(token, () => {}).then(() => {
-            res.redirect(`/${token}/`);
-        }).catch((error) => {
-            res.status(500).send(error.message);
-        });
-    });
+        await update(token, () => {});
+        res.redirect(`/${token}/`);
+    }));
 
     function sendApp(req, res, token) {
-        const origin = `${(req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim()}://${req.get('host')}`;
+        const origin = publicOrigin(req);
         const manifestUrl = publicUrl(req, token, 'manifest.json');
         const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
-        return update(token, () => {}).then((library) => {
+        return load(token, { required: true }).then((library) => {
             rememberToken(req, res, token);
             res.type('html').send(appPage({
                 token,
@@ -159,7 +177,7 @@ function createApp() {
         });
     }
 
-    app.get('/:config/configure', (req, res) => {
+    app.get('/:config/configure', asyncRoute(async (req, res) => {
         const token = readToken(req.params.config);
         if (!token) {
             res.redirect('/configure');
@@ -167,18 +185,15 @@ function createApp() {
         }
         const manifestUrl = publicUrl(req, token, 'manifest.json');
         const installUrl = manifestUrl.replace(/^https?:\/\//, 'stremio://');
-        update(token, () => {}).then((library) => {
-            res.type('html').send(configurePage({
-                manifestUrl,
-                installUrl,
-                token,
-                tmdb: credentialSource(library),
-                appUrl: publicUrl(req, token, '').replace(/\/$/, '') + '/',
-            }));
-        }).catch((error) => {
-            res.status(500).send(error.message);
-        });
-    });
+        const library = await load(token, { required: true });
+        res.type('html').send(configurePage({
+            manifestUrl,
+            installUrl,
+            token,
+            tmdb: credentialSource(library),
+            appUrl: publicUrl(req, token, '').replace(/\/$/, '') + '/',
+        }));
+    }));
 
     app.get('/:config/', asyncRoute(async (req, res) => {
         const token = readToken(req.params.config);
@@ -209,7 +224,7 @@ function createApp() {
             res.status(404).json({ err: 'Invalid token' });
             return;
         }
-        const library = await load(token);
+        const library = await load(token, { required: true });
         const iface = createInterface(library, resolveView);
         res.json(iface.manifest);
     }));
@@ -217,22 +232,33 @@ function createApp() {
     app.get('/:config/catalog/:type/:id.json', catalogRoute);
     app.get('/:config/catalog/:type/:id/:extra.json', catalogRoute);
 
+    app.use('/api/:token', asyncRoute(async (req, res, next) => {
+        req.library = await load(req.params.token, { required: true });
+        next();
+    }));
+
+    app.delete('/api/:token/device', (req, res) => {
+        res.append('Set-Cookie', `${TOKEN_KEY}=; Max-Age=0; Path=/; HttpOnly; SameSite=Lax${secureFlag(req)}`);
+        forgetStremio(req, res);
+        res.json({ ok: true });
+    });
+
     app.get('/api/:token', asyncRoute(async (req, res) => {
-        res.json(publicLibrary(await load(req.params.token)));
+        res.json(publicLibrary(req.library));
     }));
 
     app.get('/api/:token/reference', asyncRoute(async (req, res) => {
-        const library = await load(req.params.token);
+        const library = req.library;
         const country = /^[A-Z]{2}$/.test(req.query.country || '') ? req.query.country : library.settings.country;
         res.json(await reference(credentialFor(library), country, req.query.type));
     }));
 
     app.get('/api/:token/details/:type/:imdbId', asyncRoute(async (req, res) => {
-        res.json(await details(await load(req.params.token), req.params.type, req.params.imdbId));
+        res.json(await details(req.library, req.params.type, req.params.imdbId));
     }));
 
     app.get('/api/:token/suggestions/:type/:imdbId', asyncRoute(async (req, res) => {
-        res.json(await suggestions(await load(req.params.token), req.params.type, req.params.imdbId));
+        res.json(await suggestions(req.library, req.params.type, req.params.imdbId));
     }));
 
     app.get('/api/:token/person/:personId', asyncRoute(async (req, res) => {
@@ -240,12 +266,12 @@ function createApp() {
             res.status(400).json({ err: 'Invalid person id' });
             return;
         }
-        const library = await load(req.params.token);
+        const library = req.library;
         res.json(await personFilms(library, req.query.type, req.params.personId, req.query.role, String(req.query.name || '').slice(0, 120), req.query.exclude));
     }));
 
     app.get('/api/:token/search', asyncRoute(async (req, res) => {
-        const library = await load(req.params.token);
+        const library = req.library;
         const credential = credentialFor(library);
         if (!credential) {
             res.status(412).json({ err: 'Search by people and collections needs a TMDB token.', code: 'tmdb_missing' });
@@ -300,7 +326,7 @@ function createApp() {
     }
 
     app.post('/api/:token/stremio', asyncRoute(async (req, res) => {
-        await load(req.params.token);
+        await limit(req, res, 'stremio-login', 10, 15 * 60 * 1000);
         const body = req.body || {};
         let link;
         if (body.device) {
@@ -335,7 +361,7 @@ function createApp() {
 
     // Push the current Shelves manifest into Stremio (install if missing, refresh if present).
     app.post('/api/:token/stremio/addon', asyncRoute(async (req, res) => {
-        const library = await load(req.params.token);
+        const library = req.library;
         if (!library.stremio || !library.stremio.authKey) {
             const error = new Error('Connect Stremio first');
             error.status = 400;
@@ -359,7 +385,6 @@ function createApp() {
     }));
 
     app.put('/api/:token/tmdb', asyncRoute(async (req, res) => {
-        await load(req.params.token);
         const credential = await verifyCredential(req.body?.token);
         const library = await update(req.params.token, (draft) => {
             draft.settings.tmdbToken = credential;
@@ -377,7 +402,7 @@ function createApp() {
     }));
 
     app.get('/api/:token/discover', asyncRoute(async (req, res) => {
-        const library = await load(req.params.token);
+        const library = req.library;
         const filters = actions.cleanFilters({
             ...req.query,
             hideViewed: req.query.hideViewed === undefined ? library.settings.hideViewed : req.query.hideViewed !== 'false',
@@ -472,7 +497,10 @@ function createApp() {
             next(error);
             return;
         }
-        res.status(error.status || 500).json({ err: error.message || 'Request failed', code: error.code });
+        const status = Number.isInteger(error.status) && error.status >= 400 && error.status <= 599 ? error.status : 500;
+        const message = error.type === 'entity.parse.failed' ? 'Invalid JSON body'
+            : status === 500 ? 'Internal server error' : (error.message || 'Request failed');
+        res.status(status).json({ err: message, code: status === 500 ? undefined : error.code });
     });
 
     return app;
@@ -513,7 +541,7 @@ function catalogRoute(req, res, next) {
         res.status(404).json({ err: 'Invalid token' });
         return;
     }
-    load(token)
+    load(token, { required: true })
         .then((library) => stremio.freshLibrary(token, library))
         .then((library) => {
             const iface = createInterface(library, resolveView);

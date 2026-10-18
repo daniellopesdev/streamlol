@@ -87,17 +87,21 @@ function redisKey(token) {
     return `streamlol:library:${token}`;
 }
 
-async function load(token) {
+async function load(token, { required = false } = {}) {
     assertToken(token);
+    function missing() {
+        if (required) throw Object.assign(new Error('Library not found'), { status: 404 });
+        return emptyLibrary();
+    }
     const client = redis();
     if (client) {
         const parsed = await client.get(redisKey(token));
-        if (!parsed) return emptyLibrary();
+        if (!parsed) return missing();
         return normalize(typeof parsed === 'string' ? JSON.parse(parsed) : parsed);
     }
     assertWritableStorage();
     const file = fileFor(token);
-    if (!fs.existsSync(file)) return emptyLibrary();
+    if (!fs.existsSync(file)) return missing();
     return normalize(JSON.parse(fs.readFileSync(file, 'utf8')));
 }
 
@@ -124,7 +128,11 @@ function update(token, mutator) {
         await save(token, library);
         return result === undefined ? library : result;
     });
-    queues.set(token, next.then(() => {}, () => {}));
+    const settled = next.then(() => {}, () => {});
+    queues.set(token, settled);
+    settled.then(() => {
+        if (queues.get(token) === settled) queues.delete(token);
+    });
     return next;
 }
 
@@ -152,4 +160,5 @@ module.exports = {
     createId,
     storageMode,
     redisEnabled,
+    redis,
 };

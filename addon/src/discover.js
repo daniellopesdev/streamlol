@@ -17,8 +17,6 @@ const SORTS = ['popular', 'rating', 'newest', 'votes', 'list'];
 const TYPES = ['movie', 'series'];
 const TV_NOISE_GENRES = ['10763', '10766', '10767'];
 
-const referenceCache = new Map();
-const factsCache = new Map();
 const PAGE_TARGET = 20;
 const MAX_SOURCE_PAGES = 6;
 
@@ -103,9 +101,6 @@ async function mapPool(items, limit, worker) {
 }
 
 async function tmdbReference(credential, region, type) {
-    const key = `${type}:${region}`;
-    const cached = referenceCache.get(key);
-    if (cached && Date.now() - cached.at < 24 * 60 * 60 * 1000) return cached.value;
     const kind = tmdbKind(type);
     const [genres, providers] = await Promise.all([
         tmdb(credential, `/genre/${kind}/list`),
@@ -121,7 +116,6 @@ async function tmdbReference(credential, region, type) {
             }))
         ),
     };
-    referenceCache.set(key, { at: Date.now(), value });
     return value;
 }
 
@@ -150,19 +144,13 @@ async function reference(credential, country, type = 'movie') {
 
 function tmdbFacts(credential, type, tmdbId) {
     const kind = tmdbKind(type);
-    const key = `${kind}:${tmdbId}`;
-    if (!factsCache.has(key)) {
-        const pending = Promise.all([
-            tmdb(credential, `/${kind}/${tmdbId}/external_ids`),
-            tmdb(credential, `/${kind}/${tmdbId}/watch/providers`),
-        ]).then(([external, providers]) => ({
-            imdbId: external.imdb_id || null,
-            providers: providers.results || {},
-        }));
-        factsCache.set(key, pending);
-        pending.catch(() => factsCache.delete(key));
-    }
-    return factsCache.get(key);
+    return Promise.all([
+        tmdb(credential, `/${kind}/${tmdbId}/external_ids`),
+        tmdb(credential, `/${kind}/${tmdbId}/watch/providers`),
+    ]).then(([external, providers]) => ({
+        imdbId: external.imdb_id || null,
+        providers: providers.results || {},
+    }));
 }
 
 function providerIds(providerMap, country) {

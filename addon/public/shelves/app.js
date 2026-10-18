@@ -59,7 +59,6 @@
 
     function forgetDevice() {
         try { localStorage.removeItem(TOKEN_KEY); } catch { /* private mode */ }
-        document.cookie = `${TOKEN_KEY}=; Max-Age=0; Path=/; SameSite=Lax`;
     }
 
     async function api(path, options = {}) {
@@ -1610,7 +1609,7 @@
         backdrop.querySelector('#forget').onclick = async () => {
             if (!window.confirm('Forget this library and Stremio sign-in on this device? You will need the link to open it again.')) return;
             forgetDevice();
-            await api('/stremio/device', { method: 'DELETE' }).catch(() => {});
+            await api('/device', { method: 'DELETE' }).catch(() => {});
             location.href = '/';
         };
         backdrop.querySelector('#save-tmdb').onclick = async () => {

@@ -1,4 +1,6 @@
 const { tmdb } = require('./tmdb');
+const { createCache } = require('./cache');
+const { createHash } = require('node:crypto');
 
 const KINDS = ['person', 'company', 'keyword', 'collection', 'list'];
 const POOL_MS = 12 * 60 * 60 * 1000;
@@ -17,7 +19,7 @@ const CURATED = [
     },
 ];
 
-const poolCache = new Map();
+const cachedPool = createCache({ client: () => null, maxEntries: 100 });
 
 function curated(id) {
     return CURATED.find((item) => item.id === id) || null;
@@ -120,10 +122,10 @@ async function loadPool(credential, scope, type) {
 }
 
 function scopePool(credential, scope, type) {
-    const key = `${scope.kind}:${scope.id}:${scope.role || ''}:${type}`;
-    const hit = poolCache.get(key);
-    if (hit && Date.now() - hit.at < POOL_MS) return hit.value;
-    const value = loadPool(credential, scope, type).then((items) => {
+    // Lists may be private; keep assembled pools local and scoped to the credential.
+    const account = createHash('sha256').update(credential).digest('hex');
+    const key = `${account}:${scope.kind}:${scope.id}:${scope.role || ''}:${type}`;
+    return cachedPool(key, POOL_MS, () => loadPool(credential, scope, type).then((items) => {
         const seen = new Set();
         return items.filter((item, index) => {
             if (!item || seen.has(item.id)) return false;
@@ -131,10 +133,7 @@ function scopePool(credential, scope, type) {
             item.listOrder = index;
             return true;
         });
-    });
-    poolCache.set(key, { at: Date.now(), value });
-    value.catch(() => poolCache.delete(key));
-    return value;
+    }));
 }
 
 function image(path, size) {

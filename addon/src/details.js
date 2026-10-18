@@ -4,42 +4,25 @@ const { mapPool, typeOf, tmdbKind, yearOf } = require('./discover');
 const { personCredits } = require('./scopes');
 
 const ROW_SIZE = 15;
-const CACHE_MS = 6 * 60 * 60 * 1000;
-const tmdbIdCache = new Map();
-const imdbIdCache = new Map();
-const infoCache = new Map();
-
-function cached(map, key, load) {
-    const hit = map.get(key);
-    if (hit && Date.now() - hit.at < CACHE_MS) return hit.value;
-    const value = load();
-    map.set(key, { at: Date.now(), value });
-    Promise.resolve(value).catch(() => map.delete(key));
-    return value;
-}
 
 function image(path, size) {
     return path ? `https://image.tmdb.org/t/p/${size}${path}` : null;
 }
 
-function tmdbIdFor(credential, type, imdbId) {
-    return cached(tmdbIdCache, `${type}:${imdbId}`, async () => {
-        const found = await tmdb(credential, `/find/${imdbId}`, { external_source: 'imdb_id' });
-        const match = (type === 'series' ? found.tv_results : found.movie_results) || [];
-        return match.length ? match[0].id : null;
-    });
+async function tmdbIdFor(credential, type, imdbId) {
+    const found = await tmdb(credential, `/find/${imdbId}`, { external_source: 'imdb_id' });
+    const match = (type === 'series' ? found.tv_results : found.movie_results) || [];
+    return match.length ? match[0].id : null;
 }
 
-function imdbIdFor(credential, type, tmdbId) {
-    return cached(imdbIdCache, `${type}:${tmdbId}`, async () => {
-        const external = await tmdb(credential, `/${tmdbKind(type)}/${tmdbId}/external_ids`);
-        return external.imdb_id || null;
-    });
+async function imdbIdFor(credential, type, tmdbId) {
+    const external = await tmdb(credential, `/${tmdbKind(type)}/${tmdbId}/external_ids`);
+    return external.imdb_id || null;
 }
 
 function tmdbInfo(credential, type, tmdbId) {
     const append = type === 'series' ? 'aggregate_credits,recommendations,similar' : 'credits,recommendations,similar';
-    return cached(infoCache, `${type}:${tmdbId}`, () => tmdb(credential, `/${tmdbKind(type)}/${tmdbId}`, { append_to_response: append }));
+    return tmdb(credential, `/${tmdbKind(type)}/${tmdbId}`, { append_to_response: append });
 }
 
 async function tmdbFilms(credential, type, items, excludeId) {

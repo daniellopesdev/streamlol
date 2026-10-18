@@ -24,6 +24,7 @@ async function call(method, body) {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(body),
+            signal: AbortSignal.timeout(15000),
         });
     } catch {
         throw httpError('Could not reach Stremio. Try again in a moment.', 502);

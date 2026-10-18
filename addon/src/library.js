@@ -11,8 +11,14 @@ function httpError(message, status) {
     return error;
 }
 
+function filmFor(library, imdbId) {
+    if (typeof imdbId !== 'string' || !IMDB_RE.test(imdbId)) throw httpError('Invalid IMDb id', 400);
+    if (!Object.hasOwn(library.films, imdbId)) throw httpError('Film not found', 404);
+    return library.films[imdbId];
+}
+
 function cleanFilm(input, previous = {}) {
-    if (!IMDB_RE.test(input.imdbId || '')) throw httpError('Invalid IMDb id', 400);
+    if (typeof input.imdbId !== 'string' || !IMDB_RE.test(input.imdbId)) throw httpError('Invalid IMDb id', 400);
     return {
         imdbId: input.imdbId,
         type: input.type === 'series' || input.type === 'movie' ? input.type : (previous.type || 'movie'),
@@ -67,16 +73,16 @@ function upsertFilm(library, input, status) {
 }
 
 function setStatus(library, imdbId, status) {
-    if (!library.films[imdbId]) throw httpError('Film not found', 404);
+    const film = filmFor(library, imdbId);
     if (status !== 'library' && status !== 'viewed') throw httpError('Invalid status', 400);
     library.status[imdbId] = status;
-    if (status === 'viewed') library.films[imdbId].viewedAt = library.films[imdbId].viewedAt || Date.now();
-    return library.films[imdbId];
+    if (status === 'viewed') film.viewedAt = film.viewedAt || Date.now();
+    return film;
 }
 
 function setViewedAt(library, imdbId, viewedAt) {
-    const film = library.films[imdbId];
-    if (!film || library.status[imdbId] !== 'viewed') throw httpError('Film is not marked viewed', 404);
+    const film = filmFor(library, imdbId);
+    if (library.status[imdbId] !== 'viewed') throw httpError('Film is not marked viewed', 404);
     const time = Number(viewedAt);
     if (!Number.isFinite(time) || time < Date.UTC(1950, 0, 1) || time > Date.now() + 24 * 60 * 60 * 1000) {
         throw httpError('Invalid viewed date', 400);
@@ -86,7 +92,7 @@ function setViewedAt(library, imdbId, viewedAt) {
 }
 
 function setReview(library, imdbId, input) {
-    if (!library.films[imdbId]) throw httpError('Film not found', 404);
+    filmFor(library, imdbId);
     const score = Number(input.score);
     if (!Number.isFinite(score) || score < 1 || score > 10) throw httpError('Score must be from 1 to 10', 400);
     library.reviews[imdbId] = {
@@ -100,10 +106,12 @@ function setReview(library, imdbId, input) {
 }
 
 function clearReview(library, imdbId) {
+    filmFor(library, imdbId);
     delete library.reviews[imdbId];
 }
 
 function removeFilm(library, imdbId) {
+    filmFor(library, imdbId);
     delete library.films[imdbId];
     delete library.status[imdbId];
     delete library.reviews[imdbId];
@@ -139,6 +147,7 @@ function deleteList(library, id) {
 }
 
 function reorderLists(library, ids) {
+    if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) throw httpError('Invalid list order', 400);
     const order = new Map(ids.map((id, index) => [id, index]));
     library.lists.forEach((list) => {
         if (order.has(list.id)) list.order = order.get(list.id);
@@ -149,7 +158,7 @@ function reorderLists(library, ids) {
 function addFilmToList(library, listId, imdbId) {
     const list = library.lists.find((item) => item.id === listId);
     if (!list) throw httpError('List not found', 404);
-    if (!library.films[imdbId]) throw httpError('Film not found', 404);
+    filmFor(library, imdbId);
     if (!list.filmIds.includes(imdbId)) list.filmIds.push(imdbId);
     return list;
 }

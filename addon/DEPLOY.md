@@ -73,5 +73,16 @@ If `storage` is `file`, Redis env vars are missing and data will not persist on 
 
 ## Notes
 
+- Library links are bearer credentials: anyone with the full URL can read and edit that library. Keep links private. Unknown tokens are rejected; only `/configure` creates a library.
+- Creation is limited to 20 libraries per IP per hour; Stremio sign-in is limited to 10 attempts per IP per 15 minutes. Redis coordinates these limits across instances; local hosting uses bounded per-process counters. Limited requests return `429` with `Retry-After`. When configured Redis cannot enforce a limit, these actions return `503`.
+- The app trusts one reverse-proxy hop for the client IP and HTTPS scheme. Vercel handles this automatically; self-hosted deployments must restrict direct access to the backend and configure the proxy to overwrite forwarded headers. Use HTTPS for public hosting.
+- Library pages send `Referrer-Policy: no-referrer`, prevent framing and MIME sniffing, and use HttpOnly remembered-library cookies. Unexpected server errors omit internal details. Stremio requests time out after 15 seconds.
+
+- Public TMDB and Cinemeta responses are cached automatically in the connected Redis database, so users and server instances reuse metadata. No new service or environment variable is needed.
+- Discover/search/catalog pages expire after 15 minutes, title metadata and ratings after 6 hours, and TMDB genre/provider reference data after 24 hours. A bounded in-memory cache avoids Redis reads for warm entries.
+- Identical concurrent requests within one server instance share a single upstream call. Separate instances can still fetch the same cold key simultaneously; subsequent requests reuse Redis.
+- Personal libraries, viewed filters, reviews, credentials and Stremio sessions are excluded from the shared metadata cache. TMDB list pools stay local and credential-scoped. Without Redis, metadata caching works only within each running instance.
+- Upstream failures are retried on the next request. Redis errors fall back to upstream fetching; metadata keys expire automatically but add Redis storage and command usage.
+
 - Do **not** open `/configure` every time — each visit creates a **new** empty library. Reuse your bookmarked `…/<token>/configure`.
 - Local `addon/data/*.json` is separate from Redis; migrate later by copying JSON into Redis if needed.
