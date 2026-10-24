@@ -655,10 +655,21 @@
     }
 
     function titleSearch(query) {
-        state.commandQuery = query.trim();
-        state.filters.q = state.commandQuery;
-        state.filters.scope = null;
-        if (state.filters.sort === 'list') state.filters.sort = 'popular';
+        const q = String(query || '').trim();
+        if (!q) return;
+        state.commandQuery = q;
+        // Title search is a lookup, not a filtered Discover browse: drop genre/year/platform
+        // chips, force Popular (Top rated was dropping titles without a Cinemeta score),
+        // and show viewed titles so an exact match is never hidden.
+        state.filters = blankFilters({
+            country: state.filters.country,
+            hideViewed: false,
+            sort: 'popular',
+            q,
+        });
+        state.filtersOpen = false;
+        state.draft = null;
+        state.active = { kind: 'discover' };
         return search();
     }
 
@@ -743,10 +754,25 @@
 
     function renderSuggestPanel(panel, q, found, runTitleSearch) {
         panel.innerHTML = '';
+        const titles = found.titles || [];
+        if (titles.length) {
+            panel.appendChild(el('<div class="sp-group">Titles</div>'));
+            titles.forEach((item) => {
+                const node = el(`
+                  <button type="button" class="sp-item">
+                    ${item.photo ? `<img class="sp-thumb" src="${escapeHtml(item.photo)}" alt="">` : '<span class="sp-glyph">T</span>'}
+                    <span class="sp-text"><b>${escapeHtml(item.name)}</b><small>${escapeHtml([item.year, item.type === 'series' ? 'Series' : 'Movie'].filter(Boolean).join(' · '))}</small></span>
+                    <span class="sp-kind">Title</span>
+                  </button>
+                `);
+                node.onclick = () => runTitleSearch(item.name);
+                panel.appendChild(node);
+            });
+        }
         const titleRow = el(`
           <button type="button" class="sp-item sp-title">
-            <span class="sp-glyph">T</span>
-            <span class="sp-text"><b>Titles matching “${escapeHtml(q)}”</b><small>${state.type === 'series' ? 'Series' : 'Movies'} · press Enter</small></span>
+            <span class="sp-glyph">⌕</span>
+            <span class="sp-text"><b>All titles matching “${escapeHtml(q)}”</b><small>${state.type === 'series' ? 'Series' : 'Movies'} · press Enter</small></span>
           </button>
         `);
         titleRow.onclick = () => runTitleSearch(q);

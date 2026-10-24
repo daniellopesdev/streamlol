@@ -87,10 +87,12 @@ test('Discover reuses upstream data across users while applying each viewed filt
     assert.equal(first.results.length, 0, 'a user with this title viewed warms the public cache');
     const coldCalls = fetch.mock.callCount();
     assert.ok(coldCalls <= 5);
+    // Popular browse skips Cinemeta ratings; only TMDB discover + movie facts are required.
     assert.equal(fetch.mock.calls.filter(({ arguments: [input] }) => {
         const url = new URL(input);
-        return url.hostname === 'v3-cinemeta.strem.io' || url.pathname.includes('/discover/') || url.pathname === '/3/movie/98765';
-    }).length, 3);
+        return url.pathname.includes('/discover/') || url.pathname === '/3/movie/98765';
+    }).length, 2);
+    assert.equal(fetch.mock.calls.filter(({ arguments: [input] }) => new URL(input).hostname === 'v3-cinemeta.strem.io').length, 0);
     assert.equal((await discover(bob, filters)).results.length, 0);
     assert.equal(fetch.mock.callCount(), coldCalls);
     assert.equal((await discover(alice, filters)).results.length, 1);

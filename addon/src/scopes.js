@@ -155,14 +155,18 @@ async function listByUrl(credential, q) {
 
 async function searchScopes(credential, query, type) {
     const q = String(query || '').trim().slice(0, 120);
-    if (q.length < 2) return { people: [], lists: [], collections: [], companies: [], keywords: [] };
+    if (q.length < 2) {
+        return { titles: [], people: [], lists: [], collections: [], companies: [], keywords: [] };
+    }
     const lower = q.toLowerCase();
+    const kind = type === 'series' ? 'tv' : 'movie';
     const lists = CURATED
         .filter((item) => item.name.toLowerCase().includes(lower) || item.aliases.some((alias) => lower.includes(alias) || alias.startsWith(lower)))
         .map((item) => ({ kind: 'list', id: item.id, name: item.name, description: item.description, movieOnly: item.movieOnly }));
     const empty = { results: [] };
-    const [byUrl, people, companies, keywords, collections] = await Promise.all([
+    const [byUrl, titles, people, companies, keywords, collections] = await Promise.all([
         listByUrl(credential, q),
+        tmdb(credential, `/search/${kind}`, { query: q, include_adult: false }).catch(() => empty),
         tmdb(credential, '/search/person', { query: q, include_adult: false }).catch(() => empty),
         tmdb(credential, '/search/company', { query: q }).catch(() => empty),
         tmdb(credential, '/search/keyword', { query: q }).catch(() => empty),
@@ -170,6 +174,14 @@ async function searchScopes(credential, query, type) {
     ]);
     if (byUrl) lists.unshift(byUrl);
     return {
+        titles: (titles.results || []).slice(0, 8).map((item) => ({
+            kind: 'title',
+            id: String(item.id),
+            name: item.title || item.name || '',
+            year: String(item.release_date || item.first_air_date || '').slice(0, 4),
+            photo: image(item.poster_path, 'w185'),
+            type: type === 'series' ? 'series' : 'movie',
+        })).filter((item) => item.name),
         lists,
         people: (people.results || []).slice(0, 6).map((person) => ({
             kind: 'person',

@@ -17,7 +17,9 @@ test('Discover reports real cache misses and subsequent page hits without exposi
         if (url.pathname.includes('/genre/')) return Response.json({ genres: [] });
         if (url.pathname.includes('/watch/providers/')) return Response.json({ results: [] });
         if (url.pathname.includes('/search/')) return Response.json({ total_pages: 1, results: [{ id: 940001, title: 'Cache HTTP test' }] });
-        if (url.pathname === '/3/movie/940001') return Response.json({ external_ids: { imdb_id: 'tt940001' } });
+        if (url.pathname === '/3/movie/940001/external_ids' || url.pathname === '/3/movie/940001') {
+            return Response.json({ imdb_id: 'tt940001', external_ids: { imdb_id: 'tt940001' } });
+        }
         throw new Error(`Unexpected request: ${url.pathname}`);
     });
     const token = createToken();

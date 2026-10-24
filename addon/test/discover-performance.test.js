@@ -56,12 +56,17 @@ for (const sort of ['popular', 'rating']) {
         const result = await discover(library, { type: 'movie', country: 'US', sort, genres: ['Drama'], yearFrom: sort === 'rating' ? '2019' : '2018' });
         t.diagnostic(`${calls} upstream calls, ${Math.round(performance.now() - start)}ms with 20ms simulated upstream latency, peak ${peak} requests`);
         assert.equal(result.results.length, 20);
-        assert.equal(result.results.every((film) => film.imdbRating && film.platforms.includes('Netflix')), true);
+        assert.equal(result.results.every((film) => film.platforms.includes('Netflix')), true);
         if (sort === 'rating') {
+            assert.equal(result.results.every((film) => film.imdbRating), true);
             assert.equal(result.results[0].imdbId, `tt${base + 60}`);
             assert.equal(result.nextCursor, '20');
+            // Rating sort: catalog page + movie facts + Cinemeta rating per title.
+            assert.equal(calls, referenceCalls + totalPages + totalPages * 20 * 2);
+        } else {
+            // Popular browse skips Cinemeta unless minImdb is set — one facts call per title.
+            assert.equal(calls, referenceCalls + totalPages + totalPages * 20);
         }
-        assert.equal(calls, referenceCalls + totalPages + totalPages * 20 * 2);
         assert.ok(peak <= 10);
         const before = calls;
         const warmStart = performance.now();
@@ -103,7 +108,33 @@ test('an aborted filter finishes its shareable page but requests no later catalo
     await assert.rejects(discover(library, { country: 'GB', sort: 'popular' }, null, { signal: controller.signal }), { name: 'AbortError' });
     assert.equal(facts, 20);
     assert.equal(pages, 1);
-    assert.equal(ratings, 1, 'all mocked films share one IMDb id, so the rating request coalesces');
+    assert.equal(ratings, 0, 'popular browse no longer waits on Cinemeta ratings');
+});
+
+test('title search fills the grid from TMDB without waiting on Cinemeta ratings', async (t) => {
+    t.mock.method(global, 'fetch', async (input) => {
+        const url = new URL(input);
+        if (url.hostname === 'v3-cinemeta.strem.io') throw new Error('title search must not call Cinemeta');
+        if (url.pathname.includes('/genre/')) return Response.json({ genres: [] });
+        if (url.pathname.includes('/watch/providers/')) return Response.json({ results: [] });
+        if (url.pathname.includes('/search/movie')) {
+            return Response.json({
+                total_pages: 1,
+                results: [{ id: 109424, title: 'The Act of Killing', release_date: '2012-11-01', genre_ids: [99], poster_path: '/x.jpg', overview: 'doc' }],
+            });
+        }
+        if (url.pathname === '/3/movie/109424/external_ids') return Response.json({ imdb_id: 'tt2375605' });
+        throw new Error(`Unexpected request: ${url.pathname}`);
+    });
+    const library = emptyLibrary();
+    library.settings.tmdbToken = 'mock-token';
+    library.status.tt2375605 = 'viewed';
+    const hidden = await discover(library, { country: 'US', q: 'The Act of Killing', sort: 'rating', hideViewed: true });
+    assert.equal(hidden.results.length, 0, 'hideViewed still applies after enrichment');
+    const shown = await discover(library, { country: 'US', q: 'The Act of Killing', sort: 'rating', hideViewed: false });
+    assert.equal(shown.results.length, 1);
+    assert.equal(shown.results[0].title, 'The Act of Killing');
+    assert.equal(shown.results[0].imdbId, 'tt2375605');
 });
 
 test('failed rating enrichment is retried rather than persisting an empty filtered page', async (t) => {
@@ -117,7 +148,9 @@ test('failed rating enrichment is retried rather than persisting an empty filter
         if (url.pathname.includes('/genre/')) return Response.json({ genres: [] });
         if (url.pathname.includes('/watch/providers/')) return Response.json({ results: [] });
         if (url.pathname.includes('/search/')) return Response.json({ total_pages: 1, results: [{ id: 735000, title: 'Retry film' }] });
-        if (url.pathname === '/3/movie/735000') return Response.json({ external_ids: { imdb_id: 'tt735000' } });
+        if (url.pathname === '/3/movie/735000/external_ids' || url.pathname === '/3/movie/735000') {
+            return Response.json({ imdb_id: 'tt735000', external_ids: { imdb_id: 'tt735000' } });
+        }
         throw new Error(`Unexpected request: ${url.pathname}`);
     });
     const library = emptyLibrary();

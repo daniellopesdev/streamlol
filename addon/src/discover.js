@@ -148,8 +148,13 @@ async function reference(credential, country, type = 'movie') {
     };
 }
 
-async function tmdbFacts(credential, type, tmdbId) {
+async function tmdbFacts(credential, type, tmdbId, { needProviders = true } = {}) {
     const kind = tmdbKind(type);
+    // Title search usually only needs the IMDb id. Skipping watch/providers cuts a heavy payload.
+    if (!needProviders) {
+        const ids = await tmdb(credential, `/${kind}/${tmdbId}/external_ids`);
+        return { imdbId: ids.imdb_id || null, providers: {} };
+    }
     const info = await tmdb(credential, `/${kind}/${tmdbId}`, {
         append_to_response: 'external_ids,watch/providers',
     });
@@ -267,17 +272,29 @@ function sortPool(items, sort) {
 
 function enricher(credential, library, filters, ctx) {
     const { type, country } = filters;
+    const filterPlatforms = Boolean(ctx.wantedPlatforms && ctx.wantedPlatforms.length);
+    // Browse keeps provider chips; title search skips them unless a platform filter is on.
+    const fetchProviders = Boolean(ctx.fetchProviders) || filterPlatforms;
+    // Explicit title search must not depend on Cinemeta for Top rated — a missing/slow
+    // rating was wiping the whole grid even when TMDB found the film. minImdb still applies.
+    const titleLookup = Boolean(filters.q) && !filters.scope;
+    const needImdbRating = Boolean(filters.minImdb)
+        || (!titleLookup && filters.sort === 'rating' && !filters.scope);
     return async (item) => {
         ctx.signal?.throwIfAborted();
-        const facts = await tmdbFacts(credential, type, item.id).catch(() => { ctx.onError?.(); return null; });
+        const facts = await tmdbFacts(credential, type, item.id, { needProviders: fetchProviders })
+            .catch(() => { ctx.onError?.(); return null; });
         ctx.signal?.throwIfAborted();
         if (!facts || !facts.imdbId) return null;
         if (ctx.hideViewed && library.status[facts.imdbId] === 'viewed') return null;
         const available = providerIds(facts.providers, country);
-        if (ctx.checkPlatforms && ctx.wantedPlatforms.length && !ctx.wantedPlatforms.some((id) => available.has(id))) return null;
-        const rating = await imdbRating(facts.imdbId, type, { onError: ctx.onError });
-        if (filters.minImdb && !(Number(rating) >= Number(filters.minImdb))) return null;
-        if (filters.sort === 'rating' && !filters.scope && !(Number(rating) > 0)) return null;
+        if (filterPlatforms && !ctx.wantedPlatforms.some((id) => available.has(id))) return null;
+        let rating = null;
+        if (needImdbRating) {
+            rating = await imdbRating(facts.imdbId, type, { onError: ctx.onError });
+            if (filters.minImdb && !(Number(rating) >= Number(filters.minImdb))) return null;
+            if (filters.sort === 'rating' && !filters.scope && !(Number(rating) > 0)) return null;
+        }
         return {
             imdbId: facts.imdbId,
             type,
@@ -287,7 +304,7 @@ function enricher(credential, library, filters, ctx) {
             poster: item.poster_path ? `https://image.tmdb.org/t/p/w342${item.poster_path}` : null,
             genres: (item.genre_ids || []).map((id) => ctx.genreNames.get(String(id))).filter(Boolean),
             imdbRating: rating,
-            platforms: brandNamesForIds([...available], ctx.ref.providers),
+            platforms: fetchProviders ? brandNamesForIds([...available], ctx.ref.providers) : [],
             description: item.overview || '',
         };
     };
@@ -309,7 +326,7 @@ async function pooledDiscover(credential, library, filters, idFilters, ctx, curs
         return true;
     }), filters.sort);
 
-    const enrich = enricher(credential, library, filters, { ...ctx, checkPlatforms: true });
+    const enrich = enricher(credential, library, filters, { ...ctx, fetchProviders: true });
     let offset = Number(cursor) || 0;
 
     // Top rated: enrich a wider window, sort by IMDb, then paginate so ratings stay sequential.
@@ -375,16 +392,26 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed, si
     const today = new Date().toISOString().slice(0, 10);
     // Cache only public results. Viewed status is applied after reading each shared page.
     const { hideViewed: ignored, ...publicFilters } = filters;
-    const publicContext = { ...ctx, hideViewed: false, checkPlatforms: titleSearch, signal: undefined };
+    // Title search applies platform filters only; genre/year filters often hide exact matches
+    // (e.g. searching "The Act of Killing" with Action still selected).
+    const titleLocal = titleSearch
+        ? { ...idFilters, genres: [], excludeGenres: [], yearFrom: '', yearTo: '' }
+        : idFilters;
+    const publicContext = {
+        ...ctx,
+        hideViewed: false,
+        fetchProviders: !titleSearch,
+        signal: undefined,
+    };
     async function sourcePage(pathname, params) {
         signal?.throwIfAborted();
-        const key = `discover:page:v1:${JSON.stringify({ pathname, params, filters: publicFilters })}`;
+        const key = `discover:page:v3:${JSON.stringify({ pathname, params, filters: publicFilters })}`;
         const page = await cached(key, HOUR / 4, async () => {
             let complete = true;
             const enrich = enricher(credential, { status: {} }, filters, { ...publicContext, onError: () => { complete = false; } });
             const payload = await tmdb(credential, pathname, params);
             const candidates = (payload.results || []).filter((item) => {
-                if (!matchesLocal(item, idFilters)) return false;
+                if (!matchesLocal(item, titleLocal)) return false;
                 if (scope && !titleMatches(item, filters.q)) return false;
                 const date = dateOf(item);
                 if (rating && !titleSearch && date && date > today) return false;
@@ -394,7 +421,10 @@ async function tmdbDiscover(credential, library, filters, cursor, hideViewed, si
             // on disconnect, then let the cancelled caller stop before requesting another.
             const films = await mapPool(candidates, ENRICH_CONCURRENCY, enrich);
             return { results: films.filter(Boolean), totalPages: Math.min(payload.total_pages || params.page, 500), complete };
-        }, { cacheIf: (page) => page.complete });
+        }, {
+            // Never persist an empty title lookup — a transient IMDb-id miss would stick.
+            cacheIf: (page) => page.complete && (!titleSearch || page.results.length > 0),
+        });
         signal?.throwIfAborted();
         if (!page.complete && !page.results.length) {
             throw Object.assign(new Error('Metadata providers are temporarily unavailable. Please retry.'), { status: 502, code: 'metadata_unavailable' });
